@@ -9,7 +9,7 @@ import (
 	"syscall"
 
 	"github.com/golang/glog"
-	"github.com/jakubkulhan/ingress-merge"
+	ingress_merge "github.com/jakubkulhan/ingress-merge"
 	"github.com/spf13/cobra"
 )
 
@@ -54,10 +54,8 @@ func main() {
 			ctx, cancel := context.WithCancel(context.Background())
 			interrupts := make(chan os.Signal, 1)
 			go func() {
-				select {
-				case <-interrupts:
-					cancel()
-				}
+				<-interrupts
+				cancel()
 			}()
 			signal.Notify(interrupts, syscall.SIGINT, syscall.SIGTERM)
 
@@ -80,8 +78,10 @@ func main() {
 	)
 
 	rootCmd.PersistentFlags().AddGoFlagSet(goflag.CommandLine)
-	goflag.CommandLine.Parse([]string{}) // prevents glog errors
-
+	err := goflag.CommandLine.Parse([]string{}) // prevents glog errors
+	if err != nil {
+		glog.Errorf("Could not parse commmand line: %q", err.Error())
+	}
 	rootCmd.Flags().String(
 		"ingress-class",
 		"merge",

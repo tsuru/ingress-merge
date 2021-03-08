@@ -315,17 +315,13 @@ func (c *Controller) Process(ctx context.Context) {
 			})
 
 			// FIXME: merge by SecretName/Hosts?
-			for _, t := range ingress.Spec.TLS {
-				tls = append(tls, t)
-			}
+			tls = append(tls, ingress.Spec.TLS...)
 
 		rules:
 			for _, r := range ingress.Spec.Rules {
 				for _, s := range rules {
 					if r.Host == s.Host {
-						for _, path := range r.HTTP.Paths {
-							s.HTTP.Paths = append(s.HTTP.Paths, path)
-						}
+						s.HTTP.Paths = append(s.HTTP.Paths, r.HTTP.Paths...)
 						continue rules
 					}
 				}
@@ -427,7 +423,10 @@ func (c *Controller) Process(ctx context.Context) {
 		}
 
 		delete(orphaned, mergedIngres.Namespace+"/"+mergedIngres.Name)
-		c.ingressesIndex.Add(mergedIngres)
+		err := c.ingressesIndex.Add(mergedIngres)
+		if err != nil {
+			glog.Errorf("Could not add ingress to index: %q", err.Error())
+		}
 
 		for i, ingress := range ingresses {
 			if reflect.DeepEqual(ingress.Status, mergedIngres.Status) {
@@ -466,7 +465,10 @@ func (c *Controller) Process(ctx context.Context) {
 
 		glog.Infof("Deleted merged ingress [%s/%s]", ingress.Namespace, ingress.Name)
 
-		c.ingressesIndex.Delete(ingress)
+		err = c.ingressesIndex.Delete(ingress)
+		if err != nil {
+			glog.Errorf("Could not delete ingress from ingress: %q", err.Error())
+		}
 	}
 
 	if !changed {
