@@ -12,7 +12,7 @@ import (
 	"github.com/ghodss/yaml"
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	extensionsV1beta1 "k8s.io/api/extensions/v1beta1"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -404,7 +404,7 @@ func (c *Controller) Process(ctx context.Context) {
 
 			if hasIngressChanged(existingMergedIngress, mergedIngres) {
 				changed = true
-				ret, err := c.client.ExtensionsV1beta1().Ingresses(mergedIngres.Namespace).Update(mergedIngres)
+				ret, err := c.client.ExtensionsV1beta1().Ingresses(mergedIngres.Namespace).Update(ctx, mergedIngres, metaV1.UpdateOptions{})
 				if err != nil {
 					glog.Errorf("Could not update ingress [%s/%s]: %v", mergedIngres.Namespace, mergedIngres.Name, err)
 					continue
@@ -417,7 +417,7 @@ func (c *Controller) Process(ctx context.Context) {
 
 		} else {
 			changed = true
-			ret, err := c.client.ExtensionsV1beta1().Ingresses(mergedIngres.Namespace).Create(mergedIngres)
+			ret, err := c.client.ExtensionsV1beta1().Ingresses(mergedIngres.Namespace).Create(ctx, mergedIngres, metaV1.CreateOptions{})
 			if err != nil {
 				glog.Errorf("Could not create ingress [%s/%s]: %v", mergedIngres.Namespace, mergedIngres.Name, err)
 				continue
@@ -437,7 +437,7 @@ func (c *Controller) Process(ctx context.Context) {
 			mergedIngres.Status.DeepCopyInto(&ingress.Status)
 
 			changed = true
-			ret, err := c.client.ExtensionsV1beta1().Ingresses(ingress.Namespace).UpdateStatus(ingress)
+			ret, err := c.client.ExtensionsV1beta1().Ingresses(ingress.Namespace).UpdateStatus(ctx, ingress, metaV1.UpdateOptions{})
 			if err != nil {
 				glog.Errorf("Could not update status of ingress [%s/%s]: %v", ingress.Namespace, ingress.Name, err)
 				continue
@@ -458,7 +458,7 @@ func (c *Controller) Process(ctx context.Context) {
 
 	for _, ingress := range orphaned {
 		changed = true
-		err := c.client.ExtensionsV1beta1().Ingresses(ingress.Namespace).Delete(ingress.Name, nil)
+		err := c.client.ExtensionsV1beta1().Ingresses(ingress.Namespace).Delete(ctx, ingress.Name, metaV1.DeleteOptions{})
 		if err != nil {
 			glog.Errorf("Could not delete ingress [%s/%s]: %v", ingress.Namespace, ingress.Name, err)
 			continue
