@@ -484,9 +484,14 @@ func hasIngressChanged(old, new *extensionsV1beta1.Ingress) bool {
 	if !reflect.DeepEqual(new.Labels, old.Labels) {
 		return true
 	}
-	if !reflect.DeepEqual(new.Annotations, old.Annotations) {
-		return true
+
+	for k := range new.Annotations {
+		if new.Annotations[k] != old.Annotations[k] {
+			glog.Infof("Change of annotation %q will trigger a change [%s/%s]", k, old.Namespace, old.Name)
+			return true
+		}
 	}
+
 	if !reflect.DeepEqual(new.OwnerReferences, old.OwnerReferences) {
 		return true
 	}
