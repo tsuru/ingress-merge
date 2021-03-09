@@ -9,8 +9,8 @@ import (
 	"syscall"
 
 	"github.com/golang/glog"
-	ingress_merge "github.com/jakubkulhan/ingress-merge"
 	"github.com/spf13/cobra"
+	ingress_merge "github.com/tsuru/ingress-merge"
 )
 
 func main() {

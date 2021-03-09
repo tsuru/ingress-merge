@@ -1,4 +1,4 @@
-module github.com/jakubkulhan/ingress-merge
+module github.com/tsuru/ingress-merge
 
 go 1.15
 
