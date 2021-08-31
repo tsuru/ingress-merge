@@ -123,8 +123,7 @@ func (r *IngressReconciler) reconcileNamespace(ctx context.Context, ns string) e
 			continue
 		}
 
-		configMap := corev1.ConfigMap{}
-		configMap, exists = configMaps[configMapName]
+		configMap, exists := configMaps[configMapName]
 
 		if !exists {
 			err := r.Get(ctx, client.ObjectKey{
@@ -154,7 +153,7 @@ func (r *IngressReconciler) reconcileNamespace(ctx context.Context, ns string) e
 		err = r.reconcileConfigMap(ctx, ns, configMap, ingresses)
 
 		if err != nil {
-			multierror.Append(errors, err)
+			errors = multierror.Append(errors, err)
 		}
 	}
 

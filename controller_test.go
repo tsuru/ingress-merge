@@ -371,8 +371,8 @@ func TestReconcile(t *testing.T) {
 
 func newTestReconciler(objs []runtime.Object) *IngressReconciler {
 	scheme := runtime.NewScheme()
-	networkingv1.AddToScheme(scheme)
-	corev1.AddToScheme(scheme)
+	_ = networkingv1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 
 	reconciler := &IngressReconciler{
 		Log:          zap.New(zap.UseDevMode(true)),
