@@ -10,7 +10,7 @@ import (
 	"github.com/go-logr/logr"
 	multierror "github.com/hashicorp/go-multierror"
 	corev1 "k8s.io/api/core/v1"
-	extensionsV1beta1 "k8s.io/api/extensions/v1beta1"
+	networkingv1 "k8s.io/api/networking/v1"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -46,7 +46,7 @@ type IngressReconciler struct {
 }
 
 func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	ingress := &extensionsV1beta1.Ingress{}
+	ingress := &networkingv1.Ingress{}
 
 	err := r.Get(ctx, client.ObjectKey{
 		Namespace: req.Namespace,
@@ -75,7 +75,7 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 }
 
 func (r *IngressReconciler) reconcileNamespace(ctx context.Context, ns string) error {
-	ingresses := &extensionsV1beta1.IngressList{}
+	ingresses := &networkingv1.IngressList{}
 	err := r.Client.List(ctx, ingresses, &client.ListOptions{
 		Namespace: ns,
 	})
@@ -85,7 +85,7 @@ func (r *IngressReconciler) reconcileNamespace(ctx context.Context, ns string) e
 	}
 
 	var (
-		mergeMap   = make(map[string][]extensionsV1beta1.Ingress)
+		mergeMap   = make(map[string][]networkingv1.Ingress)
 		configMaps = make(map[string]corev1.ConfigMap)
 	)
 
@@ -161,7 +161,7 @@ func (r *IngressReconciler) reconcileNamespace(ctx context.Context, ns string) e
 	return errors
 }
 
-func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, configMap corev1.ConfigMap, ingresses []extensionsV1beta1.Ingress) error {
+func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, configMap corev1.ConfigMap, ingresses []networkingv1.Ingress) error {
 
 	sort.Slice(ingresses, func(i, j int) bool {
 		var (
@@ -190,8 +190,8 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, c
 
 	var (
 		ownerReferences []metaV1.OwnerReference
-		tls             []extensionsV1beta1.IngressTLS
-		rules           []extensionsV1beta1.IngressRule
+		tls             []networkingv1.IngressTLS
+		rules           []networkingv1.IngressRule
 	)
 
 	for _, ingress := range ingresses {
@@ -222,7 +222,7 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, c
 		name        string
 		labels      map[string]string
 		annotations map[string]string
-		backend     *extensionsV1beta1.IngressBackend
+		backend     *networkingv1.IngressBackend
 	)
 
 	if dataName, exists := configMap.Data[NameConfigKey]; exists {
@@ -274,7 +274,7 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, c
 		}
 	}
 
-	mergedIngress := &extensionsV1beta1.Ingress{
+	mergedIngress := &networkingv1.Ingress{
 		ObjectMeta: metaV1.ObjectMeta{
 			Namespace:       configMap.Namespace,
 			Name:            name,
@@ -282,14 +282,14 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, c
 			Annotations:     annotations,
 			OwnerReferences: ownerReferences,
 		},
-		Spec: extensionsV1beta1.IngressSpec{
-			Backend: backend,
-			TLS:     tls,
-			Rules:   rules,
+		Spec: networkingv1.IngressSpec{
+			DefaultBackend: backend,
+			TLS:            tls,
+			Rules:          rules,
 		},
 	}
 
-	var existingMergedIngress extensionsV1beta1.Ingress
+	var existingMergedIngress networkingv1.Ingress
 
 	err := r.Get(ctx, client.ObjectKey{
 		Namespace: configMap.Namespace,
@@ -371,7 +371,7 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, c
 	return nil
 }
 
-func (r *IngressReconciler) isIgnored(obj *extensionsV1beta1.Ingress) bool {
+func (r *IngressReconciler) isIgnored(obj *networkingv1.Ingress) bool {
 	for _, val := range r.IngressWatchIgnore {
 		if _, exists := obj.Annotations[val]; exists {
 			return true
@@ -383,11 +383,11 @@ func (r *IngressReconciler) isIgnored(obj *extensionsV1beta1.Ingress) bool {
 
 func (r *IngressReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&extensionsV1beta1.Ingress{}).
+		For(&networkingv1.Ingress{}).
 		Complete(r)
 }
 
-func (r *IngressReconciler) hasIngressChanged(old, new *extensionsV1beta1.Ingress) bool {
+func (r *IngressReconciler) hasIngressChanged(old, new *networkingv1.Ingress) bool {
 	if new.Namespace != old.Namespace {
 		return true
 	}
