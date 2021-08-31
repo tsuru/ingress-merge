@@ -1,11 +1,22 @@
 package ingress_merge
 
 import (
+	"context"
 	"testing"
 
-	"github.com/likexian/gokit/assert"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	extensionsV1beta1 "k8s.io/api/extensions/v1beta1"
+	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 func TestHasIngressChangedAnnotations(t *testing.T) {
@@ -32,9 +43,318 @@ func TestHasIngressChangedAnnotations(t *testing.T) {
 			},
 		},
 	}
-	result := hasIngressChanged(oldIngress, newIngress01)
+	r := &IngressReconciler{
+		Log: zap.New(zap.UseDevMode(true)),
+	}
+	result := r.hasIngressChanged(oldIngress, newIngress01)
 	assert.False(t, result)
 
-	result = hasIngressChanged(oldIngress, newIngress02)
+	result = r.hasIngressChanged(oldIngress, newIngress02)
 	assert.True(t, result)
+}
+
+func TestReconcile(t *testing.T) {
+	ctx := context.Background()
+
+	instance1 := &extensionsV1beta1.Ingress{
+		ObjectMeta: metaV1.ObjectMeta{
+			Namespace: "my-namespace",
+			Name:      "my-instance",
+			Annotations: map[string]string{
+				IngressClassAnnotation: "merge",
+				ConfigAnnotation:       "kubernetes-shared-ingress",
+			},
+		},
+		Spec: extensionsV1beta1.IngressSpec{
+			Rules: []extensionsV1beta1.IngressRule{
+				{
+					Host: "instance1.example.org",
+					IngressRuleValue: extensionsV1beta1.IngressRuleValue{
+						HTTP: &extensionsV1beta1.HTTPIngressRuleValue{
+							Paths: []extensionsV1beta1.HTTPIngressPath{
+								{
+									Path: "/*",
+									Backend: extensionsV1beta1.IngressBackend{
+										ServiceName: "instance1",
+										ServicePort: intstr.FromInt(8888),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	instance2 := &extensionsV1beta1.Ingress{
+		ObjectMeta: metaV1.ObjectMeta{
+			Namespace: "my-namespace",
+			Name:      "my-instance2",
+			Annotations: map[string]string{
+				IngressClassAnnotation: "merge",
+				ConfigAnnotation:       "kubernetes-shared-ingress",
+			},
+		},
+		Spec: extensionsV1beta1.IngressSpec{
+			Rules: []extensionsV1beta1.IngressRule{
+				{
+					Host: "instance2.example.org",
+					IngressRuleValue: extensionsV1beta1.IngressRuleValue{
+						HTTP: &extensionsV1beta1.HTTPIngressRuleValue{
+							Paths: []extensionsV1beta1.HTTPIngressPath{
+								{
+									Path: "/*",
+									Backend: extensionsV1beta1.IngressBackend{
+										ServiceName: "instance2",
+										ServicePort: intstr.FromInt(8888),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	instance3 := &extensionsV1beta1.Ingress{
+		ObjectMeta: metaV1.ObjectMeta{
+			Namespace: "my-namespace",
+			Name:      "my-instance3",
+			Annotations: map[string]string{
+				IngressClassAnnotation: "merge",
+				ConfigAnnotation:       "kubernetes-shared-ingress",
+			},
+		},
+		Spec: extensionsV1beta1.IngressSpec{
+			Rules: []extensionsV1beta1.IngressRule{
+				{
+					Host: "instance2.example.org",
+					IngressRuleValue: extensionsV1beta1.IngressRuleValue{
+						HTTP: &extensionsV1beta1.HTTPIngressRuleValue{
+							Paths: []extensionsV1beta1.HTTPIngressPath{
+								{
+									Path: "/special-route",
+									Backend: extensionsV1beta1.IngressBackend{
+										ServiceName: "instance3",
+										ServicePort: intstr.FromInt(8888),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	configMap1 := &corev1.ConfigMap{
+		ObjectMeta: metaV1.ObjectMeta{
+			Namespace: "my-namespace",
+			Name:      "kubernetes-shared-ingress",
+		},
+		Data: map[string]string{
+			"labels":      `ingress-merge-label: "label01"`,
+			"annotations": `ingress-merge-annotation: "annotation01"`,
+		},
+	}
+
+	t.Run("config map not found", func(t *testing.T) {
+		reconciler := newTestReconciler([]runtime.Object{
+			instance1,
+		})
+
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: "my-namespace",
+				Name:      "my-instance",
+			},
+		})
+
+		require.NoError(t, err)
+		sharedIngress := extensionsV1beta1.Ingress{}
+		err = reconciler.Client.Get(ctx, client.ObjectKey{Namespace: "my-namespace", Name: "kubernetes-shared-ingress"}, &sharedIngress)
+		require.True(t, k8sErrors.IsNotFound(err))
+	})
+
+	t.Run("config map found", func(t *testing.T) {
+		reconciler := newTestReconciler([]runtime.Object{
+			instance1, configMap1,
+		})
+
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: "my-namespace",
+				Name:      "my-instance",
+			},
+		})
+
+		require.NoError(t, err)
+		sharedIngress := extensionsV1beta1.Ingress{}
+		err = reconciler.Client.Get(ctx, client.ObjectKey{Namespace: "my-namespace", Name: "kubernetes-shared-ingress"}, &sharedIngress)
+		require.NoError(t, err)
+
+		assert.Equal(t, extensionsV1beta1.IngressSpec{
+			Rules: []extensionsV1beta1.IngressRule{
+				{
+					Host: "instance1.example.org",
+					IngressRuleValue: extensionsV1beta1.IngressRuleValue{
+						HTTP: &extensionsV1beta1.HTTPIngressRuleValue{
+							Paths: []extensionsV1beta1.HTTPIngressPath{
+								{
+									Path: "/*",
+									Backend: extensionsV1beta1.IngressBackend{
+										ServiceName: "instance1",
+										ServicePort: intstr.FromInt(8888),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}, sharedIngress.Spec)
+	})
+
+	t.Run("multiple instances and one ingress, not found shared ingress", func(t *testing.T) {
+		reconciler := newTestReconciler([]runtime.Object{
+			instance1, instance2, instance3,
+			configMap1,
+		})
+
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: "my-namespace",
+				Name:      "my-instance",
+			},
+		})
+
+		require.NoError(t, err)
+		sharedIngress := extensionsV1beta1.Ingress{}
+		err = reconciler.Client.Get(ctx, client.ObjectKey{Namespace: "my-namespace", Name: "kubernetes-shared-ingress"}, &sharedIngress)
+		require.NoError(t, err)
+
+		assert.Equal(t, map[string]string{
+			"ingress-merge-annotation":           "annotation01",
+			"merge.ingress.kubernetes.io/result": "true",
+		}, sharedIngress.Annotations)
+
+		assert.Equal(t, map[string]string{
+			"ingress-merge-label": "label01",
+		}, sharedIngress.Labels)
+
+		assert.Equal(t, extensionsV1beta1.IngressSpec{
+			Rules: []extensionsV1beta1.IngressRule{
+				{
+					Host: "instance1.example.org",
+					IngressRuleValue: extensionsV1beta1.IngressRuleValue{
+						HTTP: &extensionsV1beta1.HTTPIngressRuleValue{
+							Paths: []extensionsV1beta1.HTTPIngressPath{
+								{
+									Path: "/*",
+									Backend: extensionsV1beta1.IngressBackend{
+										ServiceName: "instance1",
+										ServicePort: intstr.FromInt(8888),
+									},
+								},
+							},
+						},
+					},
+				},
+				{
+					Host: "instance2.example.org",
+					IngressRuleValue: extensionsV1beta1.IngressRuleValue{
+						HTTP: &extensionsV1beta1.HTTPIngressRuleValue{
+							Paths: []extensionsV1beta1.HTTPIngressPath{
+								{
+									Path: "/*",
+									Backend: extensionsV1beta1.IngressBackend{
+										ServiceName: "instance2",
+										ServicePort: intstr.FromInt(8888),
+									},
+								},
+								{
+									Path: "/special-route",
+									Backend: extensionsV1beta1.IngressBackend{
+										ServiceName: "instance3",
+										ServicePort: intstr.FromInt(8888),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}, sharedIngress.Spec)
+	})
+
+	t.Run("multiple instances and one ingress, found shared ingress", func(t *testing.T) {
+		sharedIngress := &extensionsV1beta1.Ingress{
+			ObjectMeta: metaV1.ObjectMeta{
+				Name:      "kubernetes-shared-ingress",
+				Namespace: "my-namespace",
+				Annotations: map[string]string{
+					"merge.ingress.kubernetes.io/result": "true",
+				},
+			},
+			Status: extensionsV1beta1.IngressStatus{
+				LoadBalancer: corev1.LoadBalancerStatus{
+					Ingress: []corev1.LoadBalancerIngress{
+						{
+							IP: "1.1.8.8",
+						},
+					},
+				},
+			},
+		}
+		reconciler := newTestReconciler([]runtime.Object{
+			instance1, instance2, instance3, sharedIngress,
+			configMap1,
+		})
+
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: "my-namespace",
+				Name:      "my-instance",
+			},
+		})
+
+		require.NoError(t, err)
+		err = reconciler.Client.Get(ctx, client.ObjectKey{Namespace: "my-namespace", Name: "kubernetes-shared-ingress"}, sharedIngress)
+		require.NoError(t, err)
+
+		require.Len(t, sharedIngress.Spec.Rules, 2)
+
+		var instance extensionsV1beta1.Ingress
+		err = reconciler.Client.Get(ctx, client.ObjectKey{Namespace: "my-namespace", Name: "my-instance"}, &instance)
+		require.NoError(t, err)
+
+		assert.Equal(t, extensionsV1beta1.IngressStatus{
+			LoadBalancer: corev1.LoadBalancerStatus{
+				Ingress: []corev1.LoadBalancerIngress{
+					{
+						IP: "1.1.8.8",
+					},
+				},
+			},
+		}, instance.Status)
+	})
+}
+
+func newTestReconciler(objs []runtime.Object) *IngressReconciler {
+	scheme := runtime.NewScheme()
+	extensionsV1beta1.AddToScheme(scheme)
+	corev1.AddToScheme(scheme)
+
+	reconciler := &IngressReconciler{
+		Log:          zap.New(zap.UseDevMode(true)),
+		IngressClass: "merge",
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithRuntimeObjects(objs...).
+			Build(),
+	}
+
+	return reconciler
 }
