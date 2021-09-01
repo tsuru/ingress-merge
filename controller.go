@@ -2,23 +2,20 @@ package ingress_merge
 
 import (
 	"context"
-	"fmt"
-	"math"
 	"reflect"
 	"sort"
 	"strconv"
-	"time"
 
 	"github.com/ghodss/yaml"
-	"github.com/golang/glog"
-	"github.com/pkg/errors"
-	v1 "k8s.io/api/core/v1"
-	extensionsV1beta1 "k8s.io/api/extensions/v1beta1"
+	"github.com/go-logr/logr"
+	multierror "github.com/hashicorp/go-multierror"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/clientcmd"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 const (
@@ -35,205 +32,79 @@ const (
 	BackendConfigKey     = "backend"
 )
 
-type Controller struct {
-	MasterURL            string
-	KubeconfigPath       string
+var _ reconcile.Reconciler = &IngressReconciler{}
+
+type IngressReconciler struct {
+	client.Client
+	Log logr.Logger
+
 	IngressClass         string
 	IngressSelector      string
 	ConfigMapSelector    string
 	IngressWatchIgnore   []string
 	ConfigMapWatchIgnore []string
-
-	client             *kubernetes.Clientset
-	ingressesIndex     cache.Indexer
-	ingressesInformer  cache.Controller
-	configMapsIndex    cache.Indexer
-	configMapsInformer cache.Controller
-	wakeCh             chan struct{}
 }
 
-func NewController() *Controller {
-	return &Controller{}
+func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	ingress := &networkingv1.Ingress{}
+
+	err := r.Get(ctx, client.ObjectKey{
+		Namespace: req.Namespace,
+		Name:      req.Name,
+	}, ingress)
+	if err != nil {
+		r.Log.Error(err, "could not get ingress object")
+		return ctrl.Result{}, err
+	}
+
+	ingressClass := getIngressClass(ingress)
+
+	if ingressClass != r.IngressClass {
+		r.Log.Info("ingress does not match ingressClass, ignoring",
+			"ingress", req.String(),
+			"ingressClass", r.IngressClass)
+		return ctrl.Result{}, nil
+	}
+
+	err = r.reconcileNamespace(ctx, req.Namespace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, nil
 }
 
-func (c *Controller) Run(ctx context.Context) (err error) {
-	clientConfig, err := clientcmd.BuildConfigFromFlags(c.MasterURL, c.KubeconfigPath)
+func (r *IngressReconciler) reconcileNamespace(ctx context.Context, ns string) error {
+	ingresses := &networkingv1.IngressList{}
+	err := r.Client.List(ctx, ingresses, &client.ListOptions{
+		Namespace: ns,
+	})
+
 	if err != nil {
 		return err
 	}
-
-	c.client, err = kubernetes.NewForConfig(clientConfig)
-	if err != nil {
-		return err
-	}
-
-	childCtx, cancel := context.WithCancel(ctx)
-	defer func() {
-		if err != nil {
-			cancel()
-		}
-	}()
-
-	if _, err = labels.Parse(c.IngressSelector); err != nil {
-		return errors.Wrap(err, "Invalid Ingress selector")
-	}
-
-	c.ingressesIndex, c.ingressesInformer = cache.NewIndexerInformer(
-		cache.NewFilteredListWatchFromClient(
-			c.client.ExtensionsV1beta1().RESTClient(),
-			"ingresses",
-			"",
-			func(options *metaV1.ListOptions) {
-				options.LabelSelector = c.IngressSelector
-				duration := int64(math.MaxInt32)
-				options.TimeoutSeconds = &duration
-			}),
-		&extensionsV1beta1.Ingress{},
-		0,
-		c,
-		cache.Indexers{},
-	)
-
-	go c.ingressesInformer.Run(childCtx.Done())
-
-	if _, err = labels.Parse(c.ConfigMapSelector); err != nil {
-		return errors.Wrap(err, "Invalid ConfigMap selector")
-	}
-
-	c.configMapsIndex, c.configMapsInformer = cache.NewIndexerInformer(
-		cache.NewFilteredListWatchFromClient(
-			c.client.CoreV1().RESTClient(),
-			"configmaps",
-			"",
-			func(options *metaV1.ListOptions) {
-				options.LabelSelector = c.ConfigMapSelector
-				duration := int64(math.MaxInt32)
-				options.TimeoutSeconds = &duration
-			}),
-		&v1.ConfigMap{},
-		0,
-		c,
-		cache.Indexers{},
-	)
-
-	go c.configMapsInformer.Run(childCtx.Done())
-
-	glog.Infoln("Waiting for caches to sync")
-	if !cache.WaitForCacheSync(childCtx.Done(), c.ingressesInformer.HasSynced, c.configMapsInformer.HasSynced) {
-		return fmt.Errorf("could not sync cache")
-	}
-
-	if c.IngressSelector != "" {
-		glog.Infof("Watching Ingress objects matching the following label selector: %v", c.IngressSelector)
-	}
-
-	if c.ConfigMapSelector != "" {
-		glog.Infof("Watching ConfigMap objects matching the following label selector: %v", c.ConfigMapSelector)
-	}
-
-	if len(c.IngressWatchIgnore) > 0 {
-		glog.Infof("Ignoring Ingress objects with the following annotations: %v", c.IngressWatchIgnore)
-	}
-
-	if len(c.ConfigMapWatchIgnore) > 0 {
-		glog.Infof("Ignoring ConfigMap objects with the following annotations: %v", c.ConfigMapWatchIgnore)
-	}
-
-	c.wakeCh = make(chan struct{}, 1)
-
-	c.Process(childCtx)
-
-	var debounceCh <-chan time.Time
-	for {
-		select {
-		case <-c.wakeCh:
-			if debounceCh == nil {
-				debounceCh = time.After(1 * time.Second)
-			}
-		case <-debounceCh:
-			debounceCh = nil
-			c.Process(childCtx)
-		case <-ctx.Done():
-			return nil
-		}
-	}
-}
-
-func (c *Controller) isIgnored(obj interface{}) bool {
-
-	switch object := obj.(type) {
-	case *extensionsV1beta1.Ingress:
-		for _, val := range c.IngressWatchIgnore {
-			if _, exists := object.Annotations[val]; exists {
-				return true
-			}
-		}
-	case *v1.ConfigMap:
-		for _, val := range c.ConfigMapWatchIgnore {
-			if _, exists := object.Annotations[val]; exists {
-				return true
-			}
-		}
-	default:
-		return false
-	}
-	return false
-}
-
-func (c *Controller) OnAdd(obj interface{}) {
-	if !c.isIgnored(obj) {
-		glog.Infof("Watched resource added")
-		c.wakeUp()
-	}
-}
-
-func (c *Controller) OnUpdate(oldObj, newObj interface{}) {
-	if !c.isIgnored(oldObj) || !c.isIgnored(newObj) {
-		glog.Infof("Watched resource updated")
-		c.wakeUp()
-	}
-}
-
-func (c *Controller) OnDelete(obj interface{}) {
-	if !c.isIgnored(obj) {
-		glog.Infof("Watched resource deleted")
-		c.wakeUp()
-	}
-}
-
-func (c *Controller) wakeUp() {
-	if c.wakeCh != nil {
-		c.wakeCh <- struct{}{}
-	}
-}
-
-func (c *Controller) Process(ctx context.Context) {
-	glog.Infof("Processing ingress resources")
 
 	var (
-		mergeMap = make(map[*v1.ConfigMap][]*extensionsV1beta1.Ingress)
-		orphaned = make(map[string]*extensionsV1beta1.Ingress)
+		mergeMap   = make(map[string][]networkingv1.Ingress)
+		configMaps = make(map[string]corev1.ConfigMap)
 	)
 
-	for _, ingressIface := range c.ingressesIndex.List() {
-		ingress := ingressIface.(*extensionsV1beta1.Ingress)
+	for _, ingress := range ingresses.Items {
+		ingressClass := getIngressClass(&ingress)
+		if ingressClass != r.IngressClass {
+			continue
+		}
 
-		ingressClass := ingress.Annotations[IngressClassAnnotation]
-		if ingressClass != c.IngressClass {
-			if _, exists := ingress.Annotations[ResultAnnotation]; exists {
-				orphaned[ingress.Namespace+"/"+ingress.Name] = ingress
-			}
+		if r.isIgnored(&ingress) {
 			continue
 		}
 
 		if priorityString, exists := ingress.Annotations[PriorityAnnotation]; exists {
 			if _, err := strconv.Atoi(priorityString); err != nil {
-				glog.Errorf(
-					"Ingress [%s/%s] [%s] annotation must be an integer: %v",
-					ingress.Namespace,
-					ingress.Name,
-					PriorityAnnotation,
-					err,
+				r.Log.Error(err, "ingress annotation must be an integer",
+					"ingress", ingress.Name,
+					"namespace", ingress.Namespace,
+					"annotation", PriorityAnnotation,
 				)
 				// TODO: emit error event on ingress that priority must be integer
 
@@ -243,240 +114,286 @@ func (c *Controller) Process(ctx context.Context) {
 
 		configMapName, exists := ingress.Annotations[ConfigAnnotation]
 		if !exists {
+			r.Log.Error(nil, "ingress is missing annotation",
+				"ingress", ingress.Name,
+				"namespace", ingress.Namespace,
+				"annotation", ConfigAnnotation,
+			)
 			// TODO: emit error event on ingress that no config map name is set
-			glog.Errorf(
-				"Ingress [%s/%s] is missing [%s] annotation",
-				ingress.Namespace,
-				ingress.Name,
-				ConfigAnnotation,
-			)
 			continue
 		}
 
-		configMapIface, exists, _ := c.configMapsIndex.GetByKey(ingress.Namespace + "/" + configMapName)
+		configMap, exists := configMaps[configMapName]
+
 		if !exists {
-			// TODO: emit error event on ingress that config map does not exist
-			glog.Errorf(
-				"Ingress [%s/%s] needs ConfigMap [%s/%s], however it does not exist",
-				ingress.Namespace,
-				ingress.Name,
-				ingress.Namespace,
-				configMapName,
-			)
-			continue
-		}
+			err := r.Get(ctx, client.ObjectKey{
+				Namespace: ingress.Namespace,
+				Name:      configMapName,
+			}, &configMap)
 
-		configMap := configMapIface.(*v1.ConfigMap)
-		mergeMap[configMap] = append(mergeMap[configMap], ingress)
-	}
-
-	glog.Infof("Collected %d ingresses to be merged", len(mergeMap))
-
-	changed := false
-
-	for configMap, ingresses := range mergeMap {
-		sort.Slice(ingresses, func(i, j int) bool {
-			var (
-				a         = ingresses[i]
-				b         = ingresses[j]
-				priorityA = 0
-				priorityB = 0
-			)
-
-			if priorityString, exits := a.Annotations[PriorityAnnotation]; exits {
-				priorityA, _ = strconv.Atoi(priorityString)
-			}
-
-			if priorityString, exits := b.Annotations[PriorityAnnotation]; exits {
-				priorityB, _ = strconv.Atoi(priorityString)
-			}
-
-			if priorityA > priorityB {
-				return true
-			} else if priorityA < priorityB {
-				return false
-			} else {
-				return a.Name < b.Name
-			}
-		})
-
-		var (
-			ownerReferences []metaV1.OwnerReference
-			tls             []extensionsV1beta1.IngressTLS
-			rules           []extensionsV1beta1.IngressRule
-		)
-
-		for _, ingress := range ingresses {
-			ownerReferences = append(ownerReferences, metaV1.OwnerReference{
-				APIVersion: "extensions/v1beta1",
-				Kind:       "Ingress",
-				Name:       ingress.Name,
-				UID:        ingress.UID,
-			})
-
-			// FIXME: merge by SecretName/Hosts?
-			tls = append(tls, ingress.Spec.TLS...)
-
-		rules:
-			for _, r := range ingress.Spec.Rules {
-				for _, s := range rules {
-					if r.Host == s.Host {
-						s.HTTP.Paths = append(s.HTTP.Paths, r.HTTP.Paths...)
-						continue rules
-					}
-				}
-
-				rules = append(rules, *r.DeepCopy())
-			}
-		}
-
-		var (
-			name        string
-			labels      map[string]string
-			annotations map[string]string
-			backend     *extensionsV1beta1.IngressBackend
-		)
-
-		if dataName, exists := configMap.Data[NameConfigKey]; exists {
-			name = dataName
-		} else {
-			name = configMap.Name
-		}
-
-		if dataLabels, exists := configMap.Data[LabelsConfigKey]; exists {
-			if err := yaml.Unmarshal([]byte(dataLabels), &labels); err != nil {
-				labels = nil
-				glog.Errorf("Could unmarshal [%s] from ConfigMap [%s/%s]: %v", LabelsConfigKey, configMap.Namespace, configMap.Name, err)
-			}
-		}
-
-		if dataAnnotations, exists := configMap.Data[AnnotationsConfigKey]; exists {
-			if err := yaml.Unmarshal([]byte(dataAnnotations), &annotations); err != nil {
-				annotations = nil
-				glog.Errorf("Could not unmarshal [%s] from config [%s/%s]: %v", AnnotationsConfigKey, configMap.Namespace, configMap.Name, err)
-			}
-
-			if annotations[IngressClassAnnotation] == c.IngressClass {
-				glog.Errorf(
-					"Config [%s/%s] trying to create merged ingress of merge ingress class [%s], you have to change [%s] annotation value",
-					configMap.Namespace,
-					configMap.Name,
-					c.IngressClass,
-					IngressClassAnnotation,
-				)
-				continue
-			}
-		}
-
-		if annotations == nil {
-			annotations = make(map[string]string)
-		}
-		annotations[ResultAnnotation] = "true"
-
-		if dataBackend, exists := configMap.Data[BackendConfigKey]; exists {
-			if err := yaml.Unmarshal([]byte(dataBackend), &backend); err != nil {
-				backend = nil
-				glog.Errorf("Could not unmarshal [%s] from config [%s/%s]: %v", BackendConfigKey, configMap.Namespace, configMap.Name, err)
-			}
-		}
-
-		mergedIngres := &extensionsV1beta1.Ingress{
-			ObjectMeta: metaV1.ObjectMeta{
-				Namespace:       configMap.Namespace,
-				Name:            name,
-				Labels:          labels,
-				Annotations:     annotations,
-				OwnerReferences: ownerReferences,
-			},
-			Spec: extensionsV1beta1.IngressSpec{
-				Backend: backend,
-				TLS:     tls,
-				Rules:   rules,
-			},
-		}
-
-		if existingMergedIngressIface, exists, _ := c.ingressesIndex.Get(mergedIngres); exists {
-			existingMergedIngress := existingMergedIngressIface.(*extensionsV1beta1.Ingress)
-
-			if hasIngressChanged(existingMergedIngress, mergedIngres) {
-				changed = true
-				ret, err := c.client.ExtensionsV1beta1().Ingresses(mergedIngres.Namespace).Update(ctx, mergedIngres, metaV1.UpdateOptions{})
-				if err != nil {
-					glog.Errorf("Could not update ingress [%s/%s]: %v", mergedIngres.Namespace, mergedIngres.Name, err)
+			if err != nil {
+				if k8sErrors.IsNotFound(err) {
+					r.Log.Error(err, "configMap is not found", "name", configMapName, "ns", ns)
 					continue
 				}
-				mergedIngres = ret
-				glog.Infof("Updated merged ingress [%s/%s]", mergedIngres.Namespace, mergedIngres.Name)
-			} else {
-				mergedIngres = existingMergedIngress
+
+				return err
 			}
 
-		} else {
-			changed = true
-			ret, err := c.client.ExtensionsV1beta1().Ingresses(mergedIngres.Namespace).Create(ctx, mergedIngres, metaV1.CreateOptions{})
-			if err != nil {
-				glog.Errorf("Could not create ingress [%s/%s]: %v", mergedIngres.Namespace, mergedIngres.Name, err)
-				continue
-			}
-			mergedIngres = ret
-			glog.Infof("Created merged ingress [%s/%s]", mergedIngres.Namespace, mergedIngres.Name)
+			configMaps[configMapName] = configMap
 		}
 
-		delete(orphaned, mergedIngres.Namespace+"/"+mergedIngres.Name)
-		err := c.ingressesIndex.Add(mergedIngres)
+		mergeMap[configMapName] = append(mergeMap[configMapName], ingress)
+	}
+
+	var errors error
+
+	for configMapName, ingresses := range mergeMap {
+		configMap := configMaps[configMapName]
+		err = r.reconcileConfigMap(ctx, ns, configMap, ingresses)
+
 		if err != nil {
-			glog.Errorf("Could not add ingress to index: %q", err.Error())
+			errors = multierror.Append(errors, err)
+		}
+	}
+
+	return errors
+}
+
+func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, configMap corev1.ConfigMap, ingresses []networkingv1.Ingress) error {
+
+	sort.Slice(ingresses, func(i, j int) bool {
+		var (
+			a         = ingresses[i]
+			b         = ingresses[j]
+			priorityA = 0
+			priorityB = 0
+		)
+
+		if priorityString, exits := a.Annotations[PriorityAnnotation]; exits {
+			priorityA, _ = strconv.Atoi(priorityString)
 		}
 
-		for i, ingress := range ingresses {
-			if reflect.DeepEqual(ingress.Status, mergedIngres.Status) {
-				continue
+		if priorityString, exits := b.Annotations[PriorityAnnotation]; exits {
+			priorityB, _ = strconv.Atoi(priorityString)
+		}
+
+		if priorityA > priorityB {
+			return true
+		} else if priorityA < priorityB {
+			return false
+		} else {
+			return a.Name < b.Name
+		}
+	})
+
+	var (
+		ownerReferences []metaV1.OwnerReference
+		tls             []networkingv1.IngressTLS
+		rules           []networkingv1.IngressRule
+	)
+
+	for _, ingress := range ingresses {
+		ownerReferences = append(ownerReferences, metaV1.OwnerReference{
+			APIVersion: ingress.APIVersion,
+			Kind:       "Ingress",
+			Name:       ingress.Name,
+			UID:        ingress.UID,
+		})
+
+		// FIXME: merge by SecretName/Hosts?
+		tls = append(tls, ingress.Spec.TLS...)
+
+	rules:
+		for _, r := range ingress.Spec.Rules {
+			for _, s := range rules {
+				if r.Host == s.Host {
+					s.HTTP.Paths = append(s.HTTP.Paths, r.HTTP.Paths...)
+					continue rules
+				}
 			}
 
-			mergedIngres.Status.DeepCopyInto(&ingress.Status)
+			rules = append(rules, *r.DeepCopy())
+		}
+	}
 
-			changed = true
-			ret, err := c.client.ExtensionsV1beta1().Ingresses(ingress.Namespace).UpdateStatus(ctx, ingress, metaV1.UpdateOptions{})
-			if err != nil {
-				glog.Errorf("Could not update status of ingress [%s/%s]: %v", ingress.Namespace, ingress.Name, err)
-				continue
-			}
+	var (
+		name        string
+		labels      map[string]string
+		annotations map[string]string
+		backend     *networkingv1.IngressBackend
+	)
 
-			ingress = ret
-			ingresses[i] = ret
+	if dataName, exists := configMap.Data[NameConfigKey]; exists {
+		name = dataName
+	} else {
+		name = configMap.Name
+	}
 
-			glog.Infof(
-				"Propagated ingress status back from [%s/%s] to [%s/%s]",
-				mergedIngres.Namespace,
-				mergedIngres.Name,
-				ingress.Namespace,
-				ingress.Name,
+	if dataLabels, exists := configMap.Data[LabelsConfigKey]; exists {
+		if err := yaml.Unmarshal([]byte(dataLabels), &labels); err != nil {
+			labels = nil
+			r.Log.Error(err, "Could unmarshal labels from configmap",
+				"namespace", configMap.Namespace,
+				"configmap", configMap.Name,
 			)
 		}
 	}
 
-	for _, ingress := range orphaned {
+	if dataAnnotations, exists := configMap.Data[AnnotationsConfigKey]; exists {
+		if err := yaml.Unmarshal([]byte(dataAnnotations), &annotations); err != nil {
+			annotations = nil
+			r.Log.Error(err, "Could unmarshal annotations from configmap",
+				"namespace", configMap.Namespace,
+				"configmap", configMap.Name,
+			)
+		}
+
+		if annotations[IngressClassAnnotation] == r.IngressClass {
+			r.Log.Error(nil, "trying to create merged ingress of merge ingress class, you have to change ingress class",
+				"namespace", configMap.Namespace,
+				"configmap", configMap.Name,
+				"ingress_class", r.IngressClass,
+			)
+			return nil
+		}
+	}
+
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+	annotations[ResultAnnotation] = "true"
+
+	if dataBackend, exists := configMap.Data[BackendConfigKey]; exists {
+		if err := yaml.Unmarshal([]byte(dataBackend), &backend); err != nil {
+			backend = nil
+			r.Log.Error(err, "Could not unmarshal backend from config",
+				"namespace", configMap.Namespace,
+				"config_map", configMap.Name)
+		}
+	}
+
+	ingressClassName := configMap.Data["ingressClassName"]
+	var ingressClassNameRef *string
+	if ingressClassName != "" {
+		ingressClassNameRef = &ingressClassName
+	}
+
+	mergedIngress := &networkingv1.Ingress{
+		ObjectMeta: metaV1.ObjectMeta{
+			Namespace:       configMap.Namespace,
+			Name:            name,
+			Labels:          labels,
+			Annotations:     annotations,
+			OwnerReferences: ownerReferences,
+		},
+		Spec: networkingv1.IngressSpec{
+			IngressClassName: ingressClassNameRef,
+			DefaultBackend:   backend,
+			TLS:              tls,
+			Rules:            rules,
+		},
+	}
+
+	var existingMergedIngress networkingv1.Ingress
+
+	err := r.Get(ctx, client.ObjectKey{
+		Namespace: configMap.Namespace,
+		Name:      configMap.Name,
+	}, &existingMergedIngress)
+	existingMergedIngressFound := !k8sErrors.IsNotFound(err)
+
+	if err != nil && existingMergedIngressFound {
+		return err
+	}
+	changed := false
+
+	if existingMergedIngressFound {
+		if r.hasIngressChanged(&existingMergedIngress, mergedIngress) {
+			changed = true
+
+			mergedIngress.ObjectMeta.ResourceVersion = existingMergedIngress.ObjectMeta.ResourceVersion
+			err = r.Update(ctx, mergedIngress)
+
+			if err != nil {
+				r.Log.Error(err, "could not update ingress",
+					"namespace", mergedIngress.Namespace,
+					"name", mergedIngress.Name,
+				)
+				return err
+			}
+
+			r.Log.Info("Updated merged ingress",
+				"namespace", mergedIngress.Namespace,
+				"name", mergedIngress.Name)
+
+			mergedIngress.Status = existingMergedIngress.Status
+		} else {
+			mergedIngress = &existingMergedIngress
+		}
+
+	} else {
 		changed = true
-		err := c.client.ExtensionsV1beta1().Ingresses(ingress.Namespace).Delete(ctx, ingress.Name, metaV1.DeleteOptions{})
+		err = r.Create(ctx, mergedIngress)
 		if err != nil {
-			glog.Errorf("Could not delete ingress [%s/%s]: %v", ingress.Namespace, ingress.Name, err)
+			r.Log.Error(err, "could not create ingress", "ingress", mergedIngress.Name, "namespace", ns)
+			return err
+		}
+
+		r.Log.Info("Created merged ingress",
+			"namespace", mergedIngress.Namespace,
+			"name", mergedIngress.Name)
+	}
+
+	for _, ingress := range ingresses {
+		if reflect.DeepEqual(ingress.Status, mergedIngress.Status) {
 			continue
 		}
 
-		glog.Infof("Deleted merged ingress [%s/%s]", ingress.Namespace, ingress.Name)
+		mergedIngress.Status.DeepCopyInto(&ingress.Status)
 
-		err = c.ingressesIndex.Delete(ingress)
+		changed = true
+		err = r.Status().Update(ctx, &ingress)
 		if err != nil {
-			glog.Errorf("Could not delete ingress from ingress: %q", err.Error())
+			r.Log.Error(
+				err, "Could not update status of ingress",
+				"namespace", ingress.Namespace,
+				"ingress", ingress.Name,
+			)
+			continue
 		}
+
+		r.Log.Info("Propagated ingress status back",
+			"namespace", mergedIngress.Name,
+			"from_ingress", mergedIngress.Name,
+			"to_ingress", ingress.Name,
+		)
 	}
 
 	if !changed {
-		glog.Infof("Nothing changed")
+		r.Log.Info("Nothing changed")
 	}
+
+	return nil
 }
 
-func hasIngressChanged(old, new *extensionsV1beta1.Ingress) bool {
+func (r *IngressReconciler) isIgnored(obj *networkingv1.Ingress) bool {
+	for _, val := range r.IngressWatchIgnore {
+		if _, exists := obj.Annotations[val]; exists {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (r *IngressReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&networkingv1.Ingress{}).
+		Complete(r)
+}
+
+func (r *IngressReconciler) hasIngressChanged(old, new *networkingv1.Ingress) bool {
 	if new.Namespace != old.Namespace {
 		return true
 	}
@@ -489,7 +406,10 @@ func hasIngressChanged(old, new *extensionsV1beta1.Ingress) bool {
 
 	for k := range new.Annotations {
 		if new.Annotations[k] != old.Annotations[k] {
-			glog.Infof("Change of annotation %q will trigger a change [%s/%s]", k, old.Namespace, old.Name)
+			r.Log.Info("Change of annotation will trigger a change",
+				"annotation", k,
+				"namespace", old.Namespace,
+				"ingress", old.Name)
 			return true
 		}
 	}
@@ -502,4 +422,16 @@ func hasIngressChanged(old, new *extensionsV1beta1.Ingress) bool {
 	}
 
 	return false
+}
+
+func getIngressClass(ingress *networkingv1.Ingress) string {
+	ingressClass := ""
+	if ingress.Spec.IngressClassName != nil {
+		ingressClass = *ingress.Spec.IngressClassName
+	}
+	if ingressClass == "" {
+		ingressClass = ingress.Annotations[IngressClassAnnotation]
+	}
+
+	return ingressClass
 }
