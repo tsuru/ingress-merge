@@ -195,7 +195,7 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, c
 
 	for _, ingress := range ingresses {
 		ownerReferences = append(ownerReferences, metaV1.OwnerReference{
-			APIVersion: "extensions/v1beta1",
+			APIVersion: ingress.APIVersion,
 			Kind:       "Ingress",
 			Name:       ingress.Name,
 			UID:        ingress.UID,
