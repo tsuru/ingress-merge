@@ -57,7 +57,7 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	ingressClass := ingress.Annotations[IngressClassAnnotation]
+	ingressClass := getIngressClass(ingress)
 
 	if ingressClass != r.IngressClass {
 		r.Log.Info("ingress does not match ingressClass, ignoring",
@@ -90,7 +90,7 @@ func (r *IngressReconciler) reconcileNamespace(ctx context.Context, ns string) e
 	)
 
 	for _, ingress := range ingresses.Items {
-		ingressClass := ingress.Annotations[IngressClassAnnotation]
+		ingressClass := getIngressClass(&ingress)
 		if ingressClass != r.IngressClass {
 			continue
 		}
@@ -273,6 +273,12 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, c
 		}
 	}
 
+	ingressClassName := configMap.Data["ingressClassName"]
+	var ingressClassNameRef *string
+	if ingressClassName != "" {
+		ingressClassNameRef = &ingressClassName
+	}
+
 	mergedIngress := &networkingv1.Ingress{
 		ObjectMeta: metaV1.ObjectMeta{
 			Namespace:       configMap.Namespace,
@@ -282,9 +288,10 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, c
 			OwnerReferences: ownerReferences,
 		},
 		Spec: networkingv1.IngressSpec{
-			DefaultBackend: backend,
-			TLS:            tls,
-			Rules:          rules,
+			IngressClassName: ingressClassNameRef,
+			DefaultBackend:   backend,
+			TLS:              tls,
+			Rules:            rules,
 		},
 	}
 
@@ -415,4 +422,16 @@ func (r *IngressReconciler) hasIngressChanged(old, new *networkingv1.Ingress) bo
 	}
 
 	return false
+}
+
+func getIngressClass(ingress *networkingv1.Ingress) string {
+	ingressClass := ""
+	if ingress.Spec.IngressClassName != nil {
+		ingressClass = *ingress.Spec.IngressClassName
+	}
+	if ingressClass == "" {
+		ingressClass = ingress.Annotations[IngressClassAnnotation]
+	}
+
+	return ingressClass
 }

@@ -166,8 +166,9 @@ func TestReconcile(t *testing.T) {
 			Name:      "kubernetes-shared-ingress",
 		},
 		Data: map[string]string{
-			"labels":      `ingress-merge-label: "label01"`,
-			"annotations": `ingress-merge-annotation: "annotation01"`,
+			"labels":           `ingress-merge-label: "label01"`,
+			"ingressClassName": "my-next-ingress",
+			"annotations":      `ingress-merge-annotation: "annotation01"`,
 		},
 	}
 
@@ -206,7 +207,9 @@ func TestReconcile(t *testing.T) {
 		err = reconciler.Client.Get(ctx, client.ObjectKey{Namespace: "my-namespace", Name: "kubernetes-shared-ingress"}, &sharedIngress)
 		require.NoError(t, err)
 
+		ingressClassName := "my-next-ingress"
 		assert.Equal(t, networkingv1.IngressSpec{
+			IngressClassName: &ingressClassName,
 			Rules: []networkingv1.IngressRule{
 				{
 					Host: "instance1.example.org",
@@ -259,7 +262,9 @@ func TestReconcile(t *testing.T) {
 			"ingress-merge-label": "label01",
 		}, sharedIngress.Labels)
 
+		ingressClassName := "my-next-ingress"
 		assert.Equal(t, networkingv1.IngressSpec{
+			IngressClassName: &ingressClassName,
 			Rules: []networkingv1.IngressRule{
 				{
 					Host: "instance1.example.org",
