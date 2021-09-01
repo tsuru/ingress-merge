@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/ghodss/yaml"
 	"github.com/go-logr/logr"
@@ -41,6 +42,7 @@ type IngressReconciler struct {
 	IngressClass         string
 	IngressSelector      string
 	ConfigMapSelector    string
+	IngressMaxSlots      int
 	IngressWatchIgnore   []string
 	ConfigMapWatchIgnore []string
 }
@@ -85,11 +87,17 @@ func (r *IngressReconciler) reconcileNamespace(ctx context.Context, ns string) e
 	}
 
 	var (
-		mergeMap   = make(map[string][]networkingv1.Ingress)
-		configMaps = make(map[string]corev1.ConfigMap)
+		mergeMap        = make(map[string][]networkingv1.Ingress)
+		configMaps      = make(map[string]corev1.ConfigMap)
+		resultIngresses = []networkingv1.Ingress{}
 	)
 
 	for _, ingress := range ingresses.Items {
+		if ingress.Annotations[ResultAnnotation] == "true" {
+			resultIngresses = append(resultIngresses, ingress)
+			continue
+		}
+
 		ingressClass := getIngressClass(&ingress)
 		if ingressClass != r.IngressClass {
 			continue
@@ -149,8 +157,16 @@ func (r *IngressReconciler) reconcileNamespace(ctx context.Context, ns string) e
 	var errors error
 
 	for configMapName, ingresses := range mergeMap {
+		currentResultIngresses := []networkingv1.Ingress{}
+
+		for _, resultIngress := range resultIngresses {
+			if strings.HasPrefix(resultIngress.Name, configMapName) {
+				currentResultIngresses = append(currentResultIngresses, resultIngress)
+			}
+		}
+
 		configMap := configMaps[configMapName]
-		err = r.reconcileConfigMap(ctx, ns, configMap, ingresses)
+		err = r.reconcileConfigMap(ctx, configMap, ingresses, currentResultIngresses)
 
 		if err != nil {
 			errors = multierror.Append(errors, err)
@@ -160,8 +176,7 @@ func (r *IngressReconciler) reconcileNamespace(ctx context.Context, ns string) e
 	return errors
 }
 
-func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, configMap corev1.ConfigMap, ingresses []networkingv1.Ingress) error {
-
+func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, configMap corev1.ConfigMap, ingresses, currentResultIngresses []networkingv1.Ingress) error {
 	sort.Slice(ingresses, func(i, j int) bool {
 		var (
 			a         = ingresses[i]
@@ -187,13 +202,30 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, c
 		}
 	})
 
+	buckets := GenerateIngressBuckets(ingresses, r.IngressMaxSlots)
+
+	var errors error
+
+	for _, bucket := range buckets {
+		err := r.reconcileIngressBucket(ctx, configMap, bucket, currentResultIngresses)
+
+		if err != nil {
+			errors = multierror.Append(errors, err)
+		}
+	}
+
+	return errors
+}
+
+func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMap corev1.ConfigMap, bucket *IngressBucket, currentResultIngresses []networkingv1.Ingress) error {
+
 	var (
 		ownerReferences []metaV1.OwnerReference
 		tls             []networkingv1.IngressTLS
 		rules           []networkingv1.IngressRule
 	)
 
-	for _, ingress := range ingresses {
+	for _, ingress := range bucket.Ingresses {
 		ownerReferences = append(ownerReferences, metaV1.OwnerReference{
 			APIVersion: ingress.APIVersion,
 			Kind:       "Ingress",
@@ -336,7 +368,7 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, c
 		changed = true
 		err = r.Create(ctx, mergedIngress)
 		if err != nil {
-			r.Log.Error(err, "could not create ingress", "ingress", mergedIngress.Name, "namespace", ns)
+			r.Log.Error(err, "could not create ingress", "ingress", mergedIngress.Name, "namespace", mergedIngress.Namespace)
 			return err
 		}
 
@@ -345,7 +377,7 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, c
 			"name", mergedIngress.Name)
 	}
 
-	for _, ingress := range ingresses {
+	for _, ingress := range bucket.Ingresses {
 		if reflect.DeepEqual(ingress.Status, mergedIngress.Status) {
 			continue
 		}

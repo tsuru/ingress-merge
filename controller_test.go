@@ -380,8 +380,9 @@ func newTestReconciler(objs []runtime.Object) *IngressReconciler {
 	_ = corev1.AddToScheme(scheme)
 
 	reconciler := &IngressReconciler{
-		Log:          zap.New(zap.UseDevMode(true)),
-		IngressClass: "merge",
+		IngressMaxSlots: 45,
+		Log:             zap.New(zap.UseDevMode(true)),
+		IngressClass:    "merge",
 		Client: fake.NewClientBuilder().
 			WithScheme(scheme).
 			WithRuntimeObjects(objs...).
