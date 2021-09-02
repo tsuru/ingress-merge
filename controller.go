@@ -14,6 +14,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -202,12 +203,11 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, configMap co
 		}
 	})
 
-	buckets := GenerateIngressBuckets(ingresses, r.IngressMaxSlots)
-
+	buckets := GenerateIngressBuckets(ingresses, currentResultIngresses, r.IngressMaxSlots)
 	var errors error
 
 	for _, bucket := range buckets {
-		err := r.reconcileIngressBucket(ctx, configMap, bucket, currentResultIngresses)
+		err := r.reconcileIngressBucket(ctx, configMap, bucket)
 
 		if err != nil {
 			errors = multierror.Append(errors, err)
@@ -217,7 +217,7 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, configMap co
 	return errors
 }
 
-func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMap corev1.ConfigMap, bucket *IngressBucket, currentResultIngresses []networkingv1.Ingress) error {
+func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMap corev1.ConfigMap, bucket *IngressBucket) error {
 
 	var (
 		ownerReferences []metaV1.OwnerReference
@@ -250,17 +250,10 @@ func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMa
 	}
 
 	var (
-		name        string
 		labels      map[string]string
 		annotations map[string]string
 		backend     *networkingv1.IngressBackend
 	)
-
-	if dataName, exists := configMap.Data[NameConfigKey]; exists {
-		name = dataName
-	} else {
-		name = configMap.Name
-	}
 
 	if dataLabels, exists := configMap.Data[LabelsConfigKey]; exists {
 		if err := yaml.Unmarshal([]byte(dataLabels), &labels); err != nil {
@@ -314,7 +307,6 @@ func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMa
 	mergedIngress := &networkingv1.Ingress{
 		ObjectMeta: metaV1.ObjectMeta{
 			Namespace:       configMap.Namespace,
-			Name:            name,
 			Labels:          labels,
 			Annotations:     annotations,
 			OwnerReferences: ownerReferences,
@@ -327,17 +319,28 @@ func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMa
 		},
 	}
 
-	var existingMergedIngress networkingv1.Ingress
+	var (
+		existingMergedIngress networkingv1.Ingress
+		err                   error
+	)
 
-	err := r.Get(ctx, client.ObjectKey{
+	if bucket.Name == "" {
+		suffix := string(uuid.NewUUID())[0:7]
+		mergedIngress.Name = configMap.Name + "-" + suffix
+	} else {
+		mergedIngress.Name = bucket.Name
+	}
+
+	err = r.Get(ctx, client.ObjectKey{
 		Namespace: configMap.Namespace,
-		Name:      configMap.Name,
+		Name:      mergedIngress.Name,
 	}, &existingMergedIngress)
 	existingMergedIngressFound := !k8sErrors.IsNotFound(err)
 
 	if err != nil && existingMergedIngressFound {
 		return err
 	}
+
 	changed := false
 
 	if existingMergedIngressFound {
