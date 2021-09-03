@@ -206,18 +206,11 @@ func TestReconcile(t *testing.T) {
 		})
 
 		require.NoError(t, err)
-		sharedIngressList := networkingv1.IngressList{}
-		err = reconciler.Client.List(ctx, &sharedIngressList, &client.ListOptions{
-			Namespace: "my-namespace",
-		})
+
+		sharedIngressList, err := getSharedIngresses(ctx, reconciler.Client, "my-namespace")
 		require.NoError(t, err)
-		sharedIngress := &networkingv1.Ingress{}
-		for _, ingress := range sharedIngressList.Items {
-			if strings.HasPrefix(ingress.Name, "kubernetes-shared-ingress") {
-				sharedIngress = &ingress
-				break
-			}
-		}
+		require.Len(t, sharedIngressList, 1)
+		sharedIngress := sharedIngressList[0]
 
 		ingressClassName := "my-next-ingress"
 		assert.Equal(t, networkingv1.IngressSpec{
@@ -261,18 +254,10 @@ func TestReconcile(t *testing.T) {
 		})
 
 		require.NoError(t, err)
-		sharedIngress := &networkingv1.Ingress{}
-		sharedIngressList := networkingv1.IngressList{}
-		err = reconciler.Client.List(ctx, &sharedIngressList, &client.ListOptions{
-			Namespace: "my-namespace",
-		})
+		sharedIngresses, err := getSharedIngresses(ctx, reconciler.Client, "my-namespace")
 		require.NoError(t, err)
-		for _, ingress := range sharedIngressList.Items {
-			if strings.HasPrefix(ingress.Name, "kubernetes-shared-ingress") {
-				sharedIngress = &ingress
-				break
-			}
-		}
+		require.Len(t, sharedIngresses, 1)
+		sharedIngress := sharedIngresses[0]
 
 		assert.Equal(t, map[string]string{
 			"ingress-merge-annotation":           "annotation01",
