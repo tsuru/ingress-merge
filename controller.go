@@ -319,10 +319,7 @@ func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMa
 		},
 	}
 
-	var (
-		existingMergedIngress networkingv1.Ingress
-		err                   error
-	)
+	var existingMergedIngress networkingv1.Ingress
 
 	if bucket.Name == "" {
 		suffix := string(uuid.NewUUID())[0:7]
@@ -331,7 +328,7 @@ func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMa
 		mergedIngress.Name = bucket.Name
 	}
 
-	err = r.Get(ctx, client.ObjectKey{
+	err := r.Get(ctx, client.ObjectKey{
 		Namespace: configMap.Namespace,
 		Name:      mergedIngress.Name,
 	}, &existingMergedIngress)
@@ -340,7 +337,6 @@ func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMa
 	if err != nil && existingMergedIngressFound {
 		return err
 	}
-
 	changed := false
 
 	if existingMergedIngressFound {
