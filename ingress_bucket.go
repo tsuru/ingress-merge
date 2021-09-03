@@ -63,6 +63,13 @@ func GenerateIngressBuckets(origins, destinations []networkingv1.Ingress, maxSer
 	}
 
 	sort.Slice(ingressesWithoutDestination, func(i, j int) bool {
+		slotsI := ingressSlots(&ingressesWithoutDestination[i])
+		slotsJ := ingressSlots(&ingressesWithoutDestination[j])
+
+		if slotsI != slotsJ {
+			return slotsI < slotsJ
+		}
+
 		return ingressesWithoutDestination[i].ObjectMeta.CreationTimestamp.After(ingressesWithoutDestination[j].ObjectMeta.CreationTimestamp.Time)
 	})
 
@@ -118,6 +125,10 @@ func ingressSlots(ingress *networkingv1.Ingress) int {
 			paths = 1
 		}
 		slots += paths
+	}
+
+	if slots == 0 {
+		return 1
 	}
 
 	return slots

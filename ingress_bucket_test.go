@@ -179,3 +179,84 @@ func TestGenerateIngressBucketsWithAddress(t *testing.T) {
 	assert.Len(t, ingressBuckets[4].Ingresses, 5)
 	assert.Len(t, ingressBuckets[5].Ingresses, 5)
 }
+
+func TestGenerateIngressBucketsWithOverflow(t *testing.T) {
+	origins := []networkingv1.Ingress{}
+	destinations := []networkingv1.Ingress{}
+
+	for i := 0; i < 10; i++ {
+		rules := []networkingv1.IngressRule{}
+		uuid := uuid.NewUUID()
+
+		if i%3 == 1 {
+			for j := 0; j < 60; j++ {
+				rules = append(rules, networkingv1.IngressRule{
+					Host: fmt.Sprintf("origin-%d-%d.example.org", i+1, j+1),
+					IngressRuleValue: networkingv1.IngressRuleValue{
+						HTTP: &networkingv1.HTTPIngressRuleValue{
+							Paths: []networkingv1.HTTPIngressPath{
+								{
+									Path: "/",
+									Backend: networkingv1.IngressBackend{
+										Service: &networkingv1.IngressServiceBackend{
+											Name: fmt.Sprintf("service-%d-%d", i+1, j+1),
+											Port: networkingv1.ServiceBackendPort{
+												Number: 80,
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				})
+			}
+		} else {
+			rules = append(rules, networkingv1.IngressRule{
+				Host: fmt.Sprintf("origin-%d.example.org", i+1),
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{
+							{
+								Path: "/",
+								Backend: networkingv1.IngressBackend{
+									Service: &networkingv1.IngressServiceBackend{
+										Name: fmt.Sprintf("service-%d", i+1),
+										Port: networkingv1.ServiceBackendPort{
+											Number: 80,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+		}
+
+		origins = append(origins, networkingv1.Ingress{
+			ObjectMeta: metaV1.ObjectMeta{
+				Name: fmt.Sprintf("origin-backend-%d", i+1),
+				UID:  uuid,
+			},
+			Spec: networkingv1.IngressSpec{
+				Rules: rules,
+			},
+		})
+	}
+
+	ingressBuckets := GenerateIngressBuckets(origins, destinations, 30)
+	assert.Len(t, ingressBuckets, 4)
+
+	assert.Len(t, ingressBuckets[0].Ingresses, 7)
+	assert.Equal(t, 23, ingressBuckets[0].FreeSlots)
+
+	assert.Len(t, ingressBuckets[1].Ingresses, 1)
+	assert.Equal(t, -30, ingressBuckets[1].FreeSlots)
+
+	assert.Len(t, ingressBuckets[2].Ingresses, 1)
+	assert.Equal(t, -30, ingressBuckets[2].FreeSlots)
+
+	assert.Len(t, ingressBuckets[3].Ingresses, 1)
+	assert.Equal(t, -30, ingressBuckets[3].FreeSlots)
+}

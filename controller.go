@@ -399,14 +399,16 @@ func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMa
 		}
 
 		r.Log.Info("Propagated ingress status back",
-			"namespace", mergedIngress.Name,
+			"namespace", mergedIngress.Namespace,
 			"from_ingress", mergedIngress.Name,
 			"to_ingress", ingress.Name,
 		)
 	}
 
 	if !changed {
-		r.Log.Info("Nothing changed")
+		r.Log.Info("Nothing changed",
+			"namespace", mergedIngress.Namespace,
+			"ingress", mergedIngress.Name)
 	}
 
 	return nil
