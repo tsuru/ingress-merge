@@ -260,8 +260,9 @@ func TestReconcile(t *testing.T) {
 		sharedIngress := sharedIngresses[0]
 
 		assert.Equal(t, map[string]string{
-			"ingress-merge-annotation":           "annotation01",
-			"merge.ingress.kubernetes.io/result": "true",
+			"ingress-merge-annotation":                "annotation01",
+			"merge.ingress.kubernetes.io/result":      "true",
+			"merge.ingress.kubernetes.io/from-config": "kubernetes-shared-ingress",
 		}, sharedIngress.Annotations)
 
 		assert.Equal(t, map[string]string{
@@ -333,7 +334,8 @@ func TestReconcile(t *testing.T) {
 				Name:      "kubernetes-shared-ingress",
 				Namespace: "my-namespace",
 				Annotations: map[string]string{
-					"merge.ingress.kubernetes.io/result": "true",
+					"merge.ingress.kubernetes.io/result":      "true",
+					"merge.ingress.kubernetes.io/from-config": "kubernetes-shared-ingress",
 				},
 			},
 			Status: networkingv1.IngressStatus{

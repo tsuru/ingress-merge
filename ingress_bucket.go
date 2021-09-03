@@ -8,7 +8,6 @@ import (
 )
 
 type IngressBucket struct {
-	Name               string
 	FreeSlots          int
 	Ingresses          []networkingv1.Ingress
 	DestinationIngress *networkingv1.Ingress
@@ -29,7 +28,6 @@ func GenerateIngressBuckets(origins, destinations []networkingv1.Ingress, maxSer
 	for i := range destinations {
 		k := dependencyKey{destinations[i].Name, destinations[i].UID}
 		bucketsWithDestinationMap[k] = &IngressBucket{
-			Name:               destinations[i].Name,
 			FreeSlots:          maxServices,
 			DestinationIngress: &destinations[i],
 		}
@@ -74,7 +72,7 @@ func GenerateIngressBuckets(origins, destinations []networkingv1.Ingress, maxSer
 	})
 
 	sort.Slice(bucketsWithDestination, func(i, j int) bool {
-		return bucketsWithDestination[i].Name < bucketsWithDestination[j].Name
+		return bucketsWithDestination[i].FreeSlots > bucketsWithDestination[j].FreeSlots
 	})
 
 	var currentBucket *IngressBucket

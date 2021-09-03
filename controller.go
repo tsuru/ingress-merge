@@ -5,7 +5,6 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
-	"strings"
 
 	"github.com/ghodss/yaml"
 	"github.com/go-logr/logr"
@@ -23,6 +22,7 @@ import (
 const (
 	IngressClassAnnotation = "kubernetes.io/ingress.class"
 	ConfigAnnotation       = "merge.ingress.kubernetes.io/config"
+	FromConfigAnnotation   = "merge.ingress.kubernetes.io/from-config"
 	PriorityAnnotation     = "merge.ingress.kubernetes.io/priority"
 	ResultAnnotation       = "merge.ingress.kubernetes.io/result"
 )
@@ -161,7 +161,7 @@ func (r *IngressReconciler) reconcileNamespace(ctx context.Context, ns string) e
 		currentResultIngresses := []networkingv1.Ingress{}
 
 		for _, resultIngress := range resultIngresses {
-			if strings.HasPrefix(resultIngress.Name, configMapName) {
+			if resultIngress.Annotations[FromConfigAnnotation] == configMapName {
 				currentResultIngresses = append(currentResultIngresses, resultIngress)
 			}
 		}
@@ -220,6 +220,7 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, configMap co
 func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMap corev1.ConfigMap, bucket *IngressBucket) error {
 
 	var (
+		err             error
 		ownerReferences []metaV1.OwnerReference
 		tls             []networkingv1.IngressTLS
 		rules           []networkingv1.IngressRule
@@ -287,6 +288,7 @@ func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMa
 	if annotations == nil {
 		annotations = make(map[string]string)
 	}
+	annotations[FromConfigAnnotation] = configMap.Name
 	annotations[ResultAnnotation] = "true"
 
 	if dataBackend, exists := configMap.Data[BackendConfigKey]; exists {
@@ -319,27 +321,34 @@ func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMa
 		},
 	}
 
-	var existingMergedIngress networkingv1.Ingress
-
-	if bucket.Name == "" {
-		suffix := string(uuid.NewUUID())[0:7]
-		mergedIngress.Name = configMap.Name + "-" + suffix
-	} else {
-		mergedIngress.Name = bucket.Name
-	}
-
-	err := r.Get(ctx, client.ObjectKey{
-		Namespace: configMap.Namespace,
-		Name:      mergedIngress.Name,
-	}, &existingMergedIngress)
-	existingMergedIngressFound := !k8sErrors.IsNotFound(err)
-
-	if err != nil && existingMergedIngressFound {
-		return err
-	}
 	changed := false
 
-	if existingMergedIngressFound {
+	if bucket.DestinationIngress == nil {
+		suffix := string(uuid.NewUUID())[0:7]
+		mergedIngress.Name = configMap.Name + "-" + suffix
+		changed = true
+		err = r.Create(ctx, mergedIngress)
+		if err != nil {
+			r.Log.Error(err, "could not create ingress", "ingress", mergedIngress.Name, "namespace", mergedIngress.Namespace)
+			return err
+		}
+
+		r.Log.Info("Created merged ingress",
+			"namespace", mergedIngress.Namespace,
+			"name", mergedIngress.Name)
+	} else {
+		mergedIngress.Name = bucket.DestinationIngress.Name
+
+		var existingMergedIngress networkingv1.Ingress
+		err := r.Get(ctx, client.ObjectKey{
+			Namespace: configMap.Namespace,
+			Name:      mergedIngress.Name,
+		}, &existingMergedIngress)
+
+		if err != nil {
+			return err
+		}
+
 		if r.hasIngressChanged(&existingMergedIngress, mergedIngress) {
 			changed = true
 
@@ -359,21 +368,7 @@ func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMa
 				"name", mergedIngress.Name)
 
 			mergedIngress.Status = existingMergedIngress.Status
-		} else {
-			mergedIngress = &existingMergedIngress
 		}
-
-	} else {
-		changed = true
-		err = r.Create(ctx, mergedIngress)
-		if err != nil {
-			r.Log.Error(err, "could not create ingress", "ingress", mergedIngress.Name, "namespace", mergedIngress.Namespace)
-			return err
-		}
-
-		r.Log.Info("Created merged ingress",
-			"namespace", mergedIngress.Namespace,
-			"name", mergedIngress.Name)
 	}
 
 	for _, ingress := range bucket.Ingresses {
