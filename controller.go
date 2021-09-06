@@ -13,6 +13,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -21,6 +22,7 @@ import (
 const (
 	IngressClassAnnotation = "kubernetes.io/ingress.class"
 	ConfigAnnotation       = "merge.ingress.kubernetes.io/config"
+	FromConfigAnnotation   = "merge.ingress.kubernetes.io/from-config"
 	PriorityAnnotation     = "merge.ingress.kubernetes.io/priority"
 	ResultAnnotation       = "merge.ingress.kubernetes.io/result"
 )
@@ -41,6 +43,7 @@ type IngressReconciler struct {
 	IngressClass         string
 	IngressSelector      string
 	ConfigMapSelector    string
+	IngressMaxSlots      int
 	IngressWatchIgnore   []string
 	ConfigMapWatchIgnore []string
 }
@@ -93,11 +96,17 @@ func (r *IngressReconciler) reconcileNamespace(ctx context.Context, ns string) e
 	}
 
 	var (
-		mergeMap   = make(map[string][]networkingv1.Ingress)
-		configMaps = make(map[string]corev1.ConfigMap)
+		mergeMap        = make(map[string][]networkingv1.Ingress)
+		configMaps      = make(map[string]corev1.ConfigMap)
+		resultIngresses = []networkingv1.Ingress{}
 	)
 
 	for _, ingress := range ingresses.Items {
+		if ingress.Annotations[ResultAnnotation] == "true" {
+			resultIngresses = append(resultIngresses, ingress)
+			continue
+		}
+
 		ingressClass := getIngressClass(&ingress)
 		if ingressClass != r.IngressClass {
 			continue
@@ -157,8 +166,16 @@ func (r *IngressReconciler) reconcileNamespace(ctx context.Context, ns string) e
 	var errors error
 
 	for configMapName, ingresses := range mergeMap {
+		currentResultIngresses := []networkingv1.Ingress{}
+
+		for _, resultIngress := range resultIngresses {
+			if resultIngress.Annotations[FromConfigAnnotation] == configMapName {
+				currentResultIngresses = append(currentResultIngresses, resultIngress)
+			}
+		}
+
 		configMap := configMaps[configMapName]
-		err = r.reconcileConfigMap(ctx, ns, configMap, ingresses)
+		err = r.reconcileConfigMap(ctx, configMap, ingresses, currentResultIngresses)
 
 		if err != nil {
 			errors = multierror.Append(errors, err)
@@ -168,8 +185,7 @@ func (r *IngressReconciler) reconcileNamespace(ctx context.Context, ns string) e
 	return errors
 }
 
-func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, configMap corev1.ConfigMap, ingresses []networkingv1.Ingress) error {
-
+func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, configMap corev1.ConfigMap, ingresses, currentResultIngresses []networkingv1.Ingress) error {
 	sort.Slice(ingresses, func(i, j int) bool {
 		var (
 			a         = ingresses[i]
@@ -195,13 +211,30 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, c
 		}
 	})
 
+	buckets := GenerateIngressBuckets(ingresses, currentResultIngresses, r.IngressMaxSlots)
+	var errors error
+
+	for _, bucket := range buckets {
+		err := r.reconcileIngressBucket(ctx, configMap, bucket)
+
+		if err != nil {
+			errors = multierror.Append(errors, err)
+		}
+	}
+
+	return errors
+}
+
+func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMap corev1.ConfigMap, bucket *IngressBucket) error {
+
 	var (
+		err             error
 		ownerReferences []metaV1.OwnerReference
 		tls             []networkingv1.IngressTLS
 		rules           []networkingv1.IngressRule
 	)
 
-	for _, ingress := range ingresses {
+	for _, ingress := range bucket.Ingresses {
 		ownerReferences = append(ownerReferences, metaV1.OwnerReference{
 			APIVersion: ingress.APIVersion,
 			Kind:       "Ingress",
@@ -226,17 +259,10 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, c
 	}
 
 	var (
-		name        string
 		labels      map[string]string
 		annotations map[string]string
 		backend     *networkingv1.IngressBackend
 	)
-
-	if dataName, exists := configMap.Data[NameConfigKey]; exists {
-		name = dataName
-	} else {
-		name = configMap.Name
-	}
 
 	if dataLabels, exists := configMap.Data[LabelsConfigKey]; exists {
 		if err := yaml.Unmarshal([]byte(dataLabels), &labels); err != nil {
@@ -270,6 +296,7 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, c
 	if annotations == nil {
 		annotations = make(map[string]string)
 	}
+	annotations[FromConfigAnnotation] = configMap.Name
 	annotations[ResultAnnotation] = "true"
 
 	if dataBackend, exists := configMap.Data[BackendConfigKey]; exists {
@@ -290,7 +317,6 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, c
 	mergedIngress := &networkingv1.Ingress{
 		ObjectMeta: metaV1.ObjectMeta{
 			Namespace:       configMap.Namespace,
-			Name:            name,
 			Labels:          labels,
 			Annotations:     annotations,
 			OwnerReferences: ownerReferences,
@@ -303,20 +329,34 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, c
 		},
 	}
 
-	var existingMergedIngress networkingv1.Ingress
-
-	err := r.Get(ctx, client.ObjectKey{
-		Namespace: configMap.Namespace,
-		Name:      configMap.Name,
-	}, &existingMergedIngress)
-	existingMergedIngressFound := !k8sErrors.IsNotFound(err)
-
-	if err != nil && existingMergedIngressFound {
-		return err
-	}
 	changed := false
 
-	if existingMergedIngressFound {
+	if bucket.DestinationIngress == nil {
+		suffix := string(uuid.NewUUID())[0:7]
+		mergedIngress.Name = configMap.Name + "-" + suffix
+		changed = true
+		err = r.Create(ctx, mergedIngress)
+		if err != nil {
+			r.Log.Error(err, "could not create ingress", "ingress", mergedIngress.Name, "namespace", mergedIngress.Namespace)
+			return err
+		}
+
+		r.Log.Info("Created merged ingress",
+			"namespace", mergedIngress.Namespace,
+			"name", mergedIngress.Name)
+	} else {
+		mergedIngress.Name = bucket.DestinationIngress.Name
+
+		var existingMergedIngress networkingv1.Ingress
+		err := r.Get(ctx, client.ObjectKey{
+			Namespace: configMap.Namespace,
+			Name:      mergedIngress.Name,
+		}, &existingMergedIngress)
+
+		if err != nil {
+			return err
+		}
+
 		if r.hasIngressChanged(&existingMergedIngress, mergedIngress) {
 			changed = true
 
@@ -336,24 +376,10 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, c
 				"name", mergedIngress.Name)
 
 			mergedIngress.Status = existingMergedIngress.Status
-		} else {
-			mergedIngress = &existingMergedIngress
 		}
-
-	} else {
-		changed = true
-		err = r.Create(ctx, mergedIngress)
-		if err != nil {
-			r.Log.Error(err, "could not create ingress", "ingress", mergedIngress.Name, "namespace", ns)
-			return err
-		}
-
-		r.Log.Info("Created merged ingress",
-			"namespace", mergedIngress.Namespace,
-			"name", mergedIngress.Name)
 	}
 
-	for _, ingress := range ingresses {
+	for _, ingress := range bucket.Ingresses {
 		if reflect.DeepEqual(ingress.Status, mergedIngress.Status) {
 			continue
 		}
@@ -372,14 +398,16 @@ func (r *IngressReconciler) reconcileConfigMap(ctx context.Context, ns string, c
 		}
 
 		r.Log.Info("Propagated ingress status back",
-			"namespace", mergedIngress.Name,
+			"namespace", mergedIngress.Namespace,
 			"from_ingress", mergedIngress.Name,
 			"to_ingress", ingress.Name,
 		)
 	}
 
 	if !changed {
-		r.Log.Info("Nothing changed")
+		r.Log.Info("Nothing changed",
+			"namespace", mergedIngress.Namespace,
+			"ingress", mergedIngress.Name)
 	}
 
 	return nil

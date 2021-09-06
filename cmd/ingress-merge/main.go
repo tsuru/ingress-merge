@@ -57,6 +57,12 @@ var rootCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+
+		ingressMaxSlots, err := cmd.Flags().GetInt("ingress-max-slots")
+		if err != nil {
+			return err
+		}
+
 		mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 			Scheme:             scheme,
 			MetricsBindAddress: metricsAddr,
@@ -76,6 +82,7 @@ var rootCmd = &cobra.Command{
 			ConfigMapSelector:    configMapSelector,
 			IngressWatchIgnore:   ingressWatchIgnore,
 			ConfigMapWatchIgnore: configMapWatchIgnore,
+			IngressMaxSlots:      ingressMaxSlots,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "RpaasInstance")
 			return err
@@ -132,6 +139,12 @@ func main() {
 		"configmap-watch-ignore",
 		[]string{},
 		"Ignore configmap resources with matching annotations (can be specified multiple times).",
+	)
+
+	rootCmd.Flags().Int(
+		"ingress-max-slots",
+		45,
+		"the ingress provider may have a limit of number of ingress rules and paths, i.e: GCE ingress controller",
 	)
 
 	if err := rootCmd.Execute(); err != nil {

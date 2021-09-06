@@ -2,6 +2,9 @@ package ingress_merge
 
 import (
 	"context"
+	"fmt"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -203,9 +206,11 @@ func TestReconcile(t *testing.T) {
 		})
 
 		require.NoError(t, err)
-		sharedIngress := networkingv1.Ingress{}
-		err = reconciler.Client.Get(ctx, client.ObjectKey{Namespace: "my-namespace", Name: "kubernetes-shared-ingress"}, &sharedIngress)
+
+		sharedIngressList, err := getSharedIngresses(ctx, reconciler.Client, "my-namespace")
 		require.NoError(t, err)
+		require.Len(t, sharedIngressList, 1)
+		sharedIngress := sharedIngressList[0]
 
 		ingressClassName := "my-next-ingress"
 		assert.Equal(t, networkingv1.IngressSpec{
@@ -249,13 +254,15 @@ func TestReconcile(t *testing.T) {
 		})
 
 		require.NoError(t, err)
-		sharedIngress := networkingv1.Ingress{}
-		err = reconciler.Client.Get(ctx, client.ObjectKey{Namespace: "my-namespace", Name: "kubernetes-shared-ingress"}, &sharedIngress)
+		sharedIngresses, err := getSharedIngresses(ctx, reconciler.Client, "my-namespace")
 		require.NoError(t, err)
+		require.Len(t, sharedIngresses, 1)
+		sharedIngress := sharedIngresses[0]
 
 		assert.Equal(t, map[string]string{
-			"ingress-merge-annotation":           "annotation01",
-			"merge.ingress.kubernetes.io/result": "true",
+			"ingress-merge-annotation":                "annotation01",
+			"merge.ingress.kubernetes.io/result":      "true",
+			"merge.ingress.kubernetes.io/from-config": "kubernetes-shared-ingress",
 		}, sharedIngress.Annotations)
 
 		assert.Equal(t, map[string]string{
@@ -327,7 +334,8 @@ func TestReconcile(t *testing.T) {
 				Name:      "kubernetes-shared-ingress",
 				Namespace: "my-namespace",
 				Annotations: map[string]string{
-					"merge.ingress.kubernetes.io/result": "true",
+					"merge.ingress.kubernetes.io/result":      "true",
+					"merge.ingress.kubernetes.io/from-config": "kubernetes-shared-ingress",
 				},
 			},
 			Status: networkingv1.IngressStatus{
@@ -372,6 +380,107 @@ func TestReconcile(t *testing.T) {
 			},
 		}, instance.Status)
 	})
+
+	t.Run("multiple instances and many buckets ingresss", func(t *testing.T) {
+		objects := []runtime.Object{
+			configMap1,
+		}
+
+		for i := 0; i < 100; i++ {
+			objects = append(objects, &networkingv1.Ingress{
+				ObjectMeta: metaV1.ObjectMeta{
+					Namespace: "my-namespace",
+					Name:      fmt.Sprintf("my-instance-%d", i),
+					Annotations: map[string]string{
+						IngressClassAnnotation: "merge",
+						ConfigAnnotation:       "kubernetes-shared-ingress",
+					},
+				},
+				Spec: networkingv1.IngressSpec{
+					Rules: []networkingv1.IngressRule{
+						{
+							Host: fmt.Sprintf("instance-%d.example.org", i),
+							IngressRuleValue: networkingv1.IngressRuleValue{
+								HTTP: &networkingv1.HTTPIngressRuleValue{
+									Paths: []networkingv1.HTTPIngressPath{
+										{
+											Path: "/*",
+											Backend: networkingv1.IngressBackend{
+												Service: &networkingv1.IngressServiceBackend{
+													Name: "instance1",
+													Port: networkingv1.ServiceBackendPort{
+														Number: 8888,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+		}
+
+		reconciler := newTestReconciler(objects)
+
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: "my-namespace",
+				Name:      "my-instance-0",
+			},
+		})
+
+		require.NoError(t, err)
+
+		sharedIngresses, err := getSharedIngresses(ctx, reconciler.Client, "my-namespace")
+		require.NoError(t, err)
+		require.Len(t, sharedIngresses, 3)
+
+		assert.Equal(t, 100, (len(sharedIngresses[0].Spec.Rules) +
+			len(sharedIngresses[1].Spec.Rules) +
+			len(sharedIngresses[2].Spec.Rules)))
+
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: "my-namespace",
+				Name:      "my-instance-1",
+			},
+		})
+		require.NoError(t, err)
+
+		sharedIngresses2, err := getSharedIngresses(ctx, reconciler.Client, "my-namespace")
+		require.NoError(t, err)
+		require.Len(t, sharedIngresses2, 3)
+
+		// should maintain intact the list of sharedIngresses
+		assert.Equal(t, sharedIngresses, sharedIngresses2)
+	})
+}
+
+func getSharedIngresses(ctx context.Context, cli client.Client, namespace string) ([]networkingv1.Ingress, error) {
+	sharedIngresses := []networkingv1.Ingress{}
+	sharedIngressList := networkingv1.IngressList{}
+	err := cli.List(ctx, &sharedIngressList, &client.ListOptions{
+		Namespace: "my-namespace",
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	for _, ingress := range sharedIngressList.Items {
+		if strings.HasPrefix(ingress.Name, "kubernetes-shared-ingress") {
+			sharedIngresses = append(sharedIngresses, ingress)
+		}
+	}
+
+	sort.Slice(sharedIngresses, func(i, j int) bool {
+		return sharedIngresses[i].Name < sharedIngresses[j].Name
+	})
+
+	return sharedIngresses, nil
 }
 
 func newTestReconciler(objs []runtime.Object) *IngressReconciler {
@@ -380,8 +489,9 @@ func newTestReconciler(objs []runtime.Object) *IngressReconciler {
 	_ = corev1.AddToScheme(scheme)
 
 	reconciler := &IngressReconciler{
-		Log:          zap.New(zap.UseDevMode(true)),
-		IngressClass: "merge",
+		IngressMaxSlots: 45,
+		Log:             zap.New(zap.UseDevMode(true)),
+		IngressClass:    "merge",
 		Client: fake.NewClientBuilder().
 			WithScheme(scheme).
 			WithRuntimeObjects(objs...).
