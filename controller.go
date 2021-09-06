@@ -53,6 +53,14 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		Name:      req.Name,
 	}, ingress)
 	if err != nil {
+		if k8sErrors.IsNotFound(err) {
+			r.Log.Info("ingress has beed deleted",
+				"name", req.Name,
+				"namespace", req.Namespace,
+			)
+
+			return ctrl.Result{}, nil
+		}
 		r.Log.Error(err, "could not get ingress object")
 		return ctrl.Result{}, err
 	}
