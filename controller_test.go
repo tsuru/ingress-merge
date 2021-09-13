@@ -367,18 +367,21 @@ func TestReconcile(t *testing.T) {
 		require.Len(t, sharedIngress.Spec.Rules, 2)
 
 		var instance networkingv1.Ingress
-		err = reconciler.Client.Get(ctx, client.ObjectKey{Namespace: "my-namespace", Name: "my-instance"}, &instance)
-		require.NoError(t, err)
+		for _, instanceName := range []string{"my-instance", "my-instance2", "my-instance3"} {
+			err = reconciler.Client.Get(ctx, client.ObjectKey{Namespace: "my-namespace", Name: instanceName}, &instance)
+			require.NoError(t, err)
 
-		assert.Equal(t, networkingv1.IngressStatus{
-			LoadBalancer: corev1.LoadBalancerStatus{
-				Ingress: []corev1.LoadBalancerIngress{
-					{
-						IP: "1.1.8.8",
+			assert.Equal(t, networkingv1.IngressStatus{
+				LoadBalancer: corev1.LoadBalancerStatus{
+					Ingress: []corev1.LoadBalancerIngress{
+						{
+							IP: "1.1.8.8",
+						},
 					},
 				},
-			},
-		}, instance.Status)
+			}, instance.Status)
+			assert.Equal(t, instanceName, instance.Name)
+		}
 	})
 
 	t.Run("multiple instances and many buckets ingresss", func(t *testing.T) {
@@ -456,7 +459,80 @@ func TestReconcile(t *testing.T) {
 
 		// should maintain intact the list of sharedIngresses
 		assert.Equal(t, sharedIngresses, sharedIngresses2)
+
+		// updated shared ingress status should update also all related ingresses
+		sharedIngresses, err = setSharedIngressesLB(ctx, reconciler.Client, "my-namespace", map[string]string{"foo": "bar"})
+		require.NoError(t, err)
+
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: "my-namespace",
+				Name:      "my-instance-3",
+			},
+		})
+		require.NoError(t, err)
+
+		for _, sharedIngress := range sharedIngresses {
+			for _, ownerReference := range sharedIngress.GetOwnerReferences() {
+				if ownerReference.Kind != "Ingress" {
+					continue
+				}
+				instance := networkingv1.Ingress{}
+				err = reconciler.Client.Get(ctx, client.ObjectKey{Namespace: "my-namespace", Name: ownerReference.Name}, &instance)
+				require.NoError(t, err)
+				assert.Equal(t, sharedIngress.Status, instance.Status)
+			}
+		}
+
+		sharedIngresses, err = setSharedIngressesLB(ctx, reconciler.Client, "my-namespace", nil)
+		require.NoError(t, err)
+
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: "my-namespace",
+				Name:      "my-instance-4",
+			},
+		})
+		require.NoError(t, err)
+
+		for _, sharedIngress := range sharedIngresses {
+			for _, ownerReference := range sharedIngress.GetOwnerReferences() {
+				if ownerReference.Kind != "Ingress" {
+					continue
+				}
+				instance := networkingv1.Ingress{}
+				err = reconciler.Client.Get(ctx, client.ObjectKey{Namespace: "my-namespace", Name: ownerReference.Name}, &instance)
+				require.NoError(t, err)
+				assert.Equal(t, sharedIngress.Status, instance.Status)
+			}
+		}
 	})
+}
+
+func setSharedIngressesLB(ctx context.Context, cli client.Client, namespace string, labels map[string]string) ([]networkingv1.Ingress, error) {
+	sharedIngresses, err := getSharedIngresses(ctx, cli, namespace)
+	if err != nil {
+		return nil, err
+	}
+	for i := range sharedIngresses {
+		for k, v := range labels {
+			sharedIngresses[i].Labels[k] = v
+		}
+		sharedIngresses[i].Status = networkingv1.IngressStatus{
+			LoadBalancer: corev1.LoadBalancerStatus{
+				Ingress: []corev1.LoadBalancerIngress{
+					{
+						IP: fmt.Sprintf("1.1.8.%d", i),
+					},
+				},
+			},
+		}
+	}
+	err = updateSharedIngresses(ctx, cli, sharedIngresses, namespace)
+	if err != nil {
+		return nil, err
+	}
+	return sharedIngresses, err
 }
 
 func getSharedIngresses(ctx context.Context, cli client.Client, namespace string) ([]networkingv1.Ingress, error) {
@@ -481,6 +557,16 @@ func getSharedIngresses(ctx context.Context, cli client.Client, namespace string
 	})
 
 	return sharedIngresses, nil
+}
+
+func updateSharedIngresses(ctx context.Context, cli client.Client, sharedIngresses []networkingv1.Ingress, namespace string) error {
+	for _, sharedIngress := range sharedIngresses {
+		err := cli.Update(ctx, &sharedIngress)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func newTestReconciler(objs []runtime.Object) *IngressReconciler {

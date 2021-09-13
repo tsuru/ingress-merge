@@ -376,6 +376,8 @@ func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMa
 				"name", mergedIngress.Name)
 
 			mergedIngress.Status = existingMergedIngress.Status
+		} else {
+			mergedIngress = &existingMergedIngress
 		}
 	}
 
