@@ -57,11 +57,14 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}, ingress)
 	if err != nil {
 		if k8sErrors.IsNotFound(err) {
-			r.Log.Info("ingress has beed deleted",
+			r.Log.Info("ingress has been deleted",
 				"name", req.Name,
 				"namespace", req.Namespace,
 			)
-
+			err = r.reconcileNamespace(ctx, req.Namespace)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
 			return ctrl.Result{}, nil
 		}
 		r.Log.Error(err, "could not get ingress object")
@@ -70,7 +73,12 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	ingressClass := getIngressClass(ingress)
 
-	if ingressClass != r.IngressClass {
+	if ingress.Annotations[ResultAnnotation] == "true" {
+		r.Log.Info("reconciling cause the merged instance has been changed",
+			"namespace", req.Namespace,
+			"name", req.Name,
+		)
+	} else if ingressClass != r.IngressClass {
 		r.Log.Info("ingress does not match ingressClass, ignoring",
 			"ingress", req.String(),
 			"ingressClass", r.IngressClass)
