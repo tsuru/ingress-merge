@@ -520,6 +520,7 @@ func wildcardTLSEntry(wildcardDomains map[string]bool, bucket *IngressBucket) ne
 		hosts = append(hosts, domain)
 	}
 
+	sort.Strings(hosts)
 	secretName := ""
 	if bucket.DestinationIngress != nil {
 		secretName = bucket.DestinationIngress.Name + wildcardTLSSuffix
