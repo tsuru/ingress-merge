@@ -175,6 +175,19 @@ func TestReconcile(t *testing.T) {
 		},
 	}
 
+	configMap2 := &corev1.ConfigMap{
+		ObjectMeta: metaV1.ObjectMeta{
+			Namespace: "my-namespace",
+			Name:      "kubernetes-shared-ingress",
+		},
+		Data: map[string]string{
+			"labels":           `ingress-merge-label: "label01"`,
+			"ingressClassName": "my-next-ingress",
+			"annotations":      `ingress-merge-annotation: "annotation01"`,
+			"use-wildcard-tls": "true",
+		},
+	}
+
 	t.Run("config map not found", func(t *testing.T) {
 		reconciler := newTestReconciler([]runtime.Object{
 			instance1,
@@ -215,6 +228,59 @@ func TestReconcile(t *testing.T) {
 		ingressClassName := "my-next-ingress"
 		assert.Equal(t, networkingv1.IngressSpec{
 			IngressClassName: &ingressClassName,
+			Rules: []networkingv1.IngressRule{
+				{
+					Host: "instance1.example.org",
+					IngressRuleValue: networkingv1.IngressRuleValue{
+						HTTP: &networkingv1.HTTPIngressRuleValue{
+							Paths: []networkingv1.HTTPIngressPath{
+								{
+									Path: "/*",
+									Backend: networkingv1.IngressBackend{
+										Service: &networkingv1.IngressServiceBackend{
+											Name: "instance1",
+											Port: networkingv1.ServiceBackendPort{
+												Number: 8888,
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}, sharedIngress.Spec)
+	})
+
+	t.Run("use wildcard TLS enabled", func(t *testing.T) {
+		reconciler := newTestReconciler([]runtime.Object{
+			instance1, configMap2,
+		})
+
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: "my-namespace",
+				Name:      "my-instance",
+			},
+		})
+
+		require.NoError(t, err)
+
+		sharedIngressList, err := getSharedIngresses(ctx, reconciler.Client, "my-namespace")
+		require.NoError(t, err)
+		require.Len(t, sharedIngressList, 1)
+		sharedIngress := sharedIngressList[0]
+
+		ingressClassName := "my-next-ingress"
+		assert.Equal(t, networkingv1.IngressSpec{
+			IngressClassName: &ingressClassName,
+			TLS: []networkingv1.IngressTLS{
+				{
+					Hosts:      []string{"*.example.org"},
+					SecretName: sharedIngress.Name + wildcardTLSSuffix,
+				},
+			},
 			Rules: []networkingv1.IngressRule{
 				{
 					Host: "instance1.example.org",

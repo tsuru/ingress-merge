@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/ghodss/yaml"
 	"github.com/go-logr/logr"
@@ -32,6 +33,8 @@ const (
 	LabelsConfigKey      = "labels"
 	AnnotationsConfigKey = "annotations"
 	BackendConfigKey     = "backend"
+	UseWildcardTLSKey    = "use-wildcard-tls"
+	wildcardTLSSuffix    = "-wildcard-tls"
 )
 
 var _ reconcile.Reconciler = &IngressReconciler{}
@@ -240,6 +243,8 @@ func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMa
 		ownerReferences []metaV1.OwnerReference
 		tls             []networkingv1.IngressTLS
 		rules           []networkingv1.IngressRule
+		useWildcardTLS  bool            = configMap.Data[UseWildcardTLSKey] == "true"
+		wildcardDomains map[string]bool = make(map[string]bool)
 	)
 
 	for _, ingress := range bucket.Ingresses {
@@ -251,7 +256,11 @@ func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMa
 		})
 
 		// FIXME: merge by SecretName/Hosts?
-		tls = append(tls, ingress.Spec.TLS...)
+		if useWildcardTLS {
+			wildcardDomains = mergeWildcardDomains(wildcardDomains, ingress.Spec.Rules)
+		} else {
+			tls = append(tls, ingress.Spec.TLS...)
+		}
 
 	rules:
 		for _, r := range ingress.Spec.Rules {
@@ -264,6 +273,10 @@ func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMa
 
 			rules = append(rules, *r.DeepCopy())
 		}
+	}
+
+	if useWildcardTLS {
+		tls = append(tls, wildcardTLSEntry(wildcardDomains, bucket))
 	}
 
 	var (
@@ -343,6 +356,11 @@ func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMa
 		suffix := string(uuid.NewUUID())[0:7]
 		mergedIngress.Name = configMap.Name + "-" + suffix
 		changed = true
+
+		if useWildcardTLS && len(mergedIngress.Spec.TLS) > 0 {
+			mergedIngress.Spec.TLS[0].SecretName = mergedIngress.Name + wildcardTLSSuffix
+		}
+
 		err = r.Create(ctx, mergedIngress)
 		if err != nil {
 			r.Log.Error(err, "could not create ingress", "ingress", mergedIngress.Name, "namespace", mergedIngress.Namespace)
@@ -480,4 +498,35 @@ func getIngressClass(ingress *networkingv1.Ingress) string {
 	}
 
 	return ingressClass
+}
+
+func mergeWildcardDomains(wildcardDomains map[string]bool, rules []networkingv1.IngressRule) map[string]bool {
+	for _, rule := range rules {
+		parts := strings.Split(rule.Host, ".")
+		if len(parts) == 1 {
+			continue
+		}
+
+		key := "*." + strings.Join(parts[1:], ".")
+		wildcardDomains[key] = true
+	}
+
+	return wildcardDomains
+}
+
+func wildcardTLSEntry(wildcardDomains map[string]bool, bucket *IngressBucket) networkingv1.IngressTLS {
+	hosts := []string{}
+	for domain := range wildcardDomains {
+		hosts = append(hosts, domain)
+	}
+
+	secretName := ""
+	if bucket.DestinationIngress != nil {
+		secretName = bucket.DestinationIngress.Name + wildcardTLSSuffix
+	}
+
+	return networkingv1.IngressTLS{
+		SecretName: secretName,
+		Hosts:      hosts,
+	}
 }
