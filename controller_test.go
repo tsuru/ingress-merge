@@ -93,6 +93,44 @@ func TestReconcile(t *testing.T) {
 		},
 	}
 
+	instanceIgnoreWildcard := &networkingv1.Ingress{
+		ObjectMeta: metaV1.ObjectMeta{
+			Namespace: "my-namespace",
+			Name:      "my-instance-ignore-wildcard",
+			Annotations: map[string]string{
+				IngressClassAnnotation: "merge",
+				ConfigAnnotation:       "kubernetes-shared-ingress",
+			},
+			Labels: map[string]string{
+				"test-ignore": "true",
+			},
+		},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{
+				{
+					Host: "instance-other.example.com",
+					IngressRuleValue: networkingv1.IngressRuleValue{
+						HTTP: &networkingv1.HTTPIngressRuleValue{
+							Paths: []networkingv1.HTTPIngressPath{
+								{
+									Path: "/*",
+									Backend: networkingv1.IngressBackend{
+										Service: &networkingv1.IngressServiceBackend{
+											Name: "instance-other",
+											Port: networkingv1.ServiceBackendPort{
+												Number: 8888,
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
 	instance2 := &networkingv1.Ingress{
 		ObjectMeta: metaV1.ObjectMeta{
 			Namespace: "my-namespace",
@@ -181,10 +219,11 @@ func TestReconcile(t *testing.T) {
 			Name:      "kubernetes-shared-ingress",
 		},
 		Data: map[string]string{
-			"labels":           `ingress-merge-label: "label01"`,
-			"ingressClassName": "my-next-ingress",
-			"annotations":      `ingress-merge-annotation: "annotation01"`,
-			"use-wildcard-tls": "true",
+			"labels":                `ingress-merge-label: "label01"`,
+			"ingressClassName":      "my-next-ingress",
+			"annotations":           `ingress-merge-annotation: "annotation01"`,
+			UseWildcardTLSKey:       "true",
+			UseWildcardTLSIgnoreKey: "test-ignore=true",
 		},
 	}
 
@@ -255,7 +294,7 @@ func TestReconcile(t *testing.T) {
 
 	t.Run("use wildcard TLS enabled", func(t *testing.T) {
 		reconciler := newTestReconciler([]runtime.Object{
-			instance1, configMap2,
+			instance1, instanceIgnoreWildcard, configMap2,
 		})
 
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{
@@ -292,6 +331,26 @@ func TestReconcile(t *testing.T) {
 									Backend: networkingv1.IngressBackend{
 										Service: &networkingv1.IngressServiceBackend{
 											Name: "instance1",
+											Port: networkingv1.ServiceBackendPort{
+												Number: 8888,
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				{
+					Host: "instance-other.example.com",
+					IngressRuleValue: networkingv1.IngressRuleValue{
+						HTTP: &networkingv1.HTTPIngressRuleValue{
+							Paths: []networkingv1.HTTPIngressPath{
+								{
+									Path: "/*",
+									Backend: networkingv1.IngressBackend{
+										Service: &networkingv1.IngressServiceBackend{
+											Name: "instance-other",
 											Port: networkingv1.ServiceBackendPort{
 												Number: 8888,
 											},

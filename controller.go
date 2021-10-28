@@ -14,6 +14,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -29,12 +30,13 @@ const (
 )
 
 const (
-	NameConfigKey        = "name"
-	LabelsConfigKey      = "labels"
-	AnnotationsConfigKey = "annotations"
-	BackendConfigKey     = "backend"
-	UseWildcardTLSKey    = "use-wildcard-tls"
-	wildcardTLSSuffix    = "-wildcard-tls"
+	NameConfigKey           = "name"
+	LabelsConfigKey         = "labels"
+	AnnotationsConfigKey    = "annotations"
+	BackendConfigKey        = "backend"
+	UseWildcardTLSKey       = "use-wildcard-tls"
+	UseWildcardTLSIgnoreKey = "use-wildcard-tls-ignore"
+	wildcardTLSSuffix       = "-wildcard-tls"
 )
 
 var _ reconcile.Reconciler = &IngressReconciler{}
@@ -247,6 +249,15 @@ func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMa
 		wildcardDomains map[string]bool = make(map[string]bool)
 	)
 
+	useWildcardTLSIgnore := labels.Nothing()
+	useWildcardTLSIgnoreString := configMap.Data[UseWildcardTLSIgnoreKey]
+	if useWildcardTLSIgnoreString != "" {
+		useWildcardTLSIgnore, err = parseLabels(useWildcardTLSIgnoreString)
+		if err != nil {
+			return err
+		}
+	}
+
 	for _, ingress := range bucket.Ingresses {
 		ownerReferences = append(ownerReferences, metaV1.OwnerReference{
 			APIVersion: ingress.APIVersion,
@@ -254,13 +265,6 @@ func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMa
 			Name:       ingress.Name,
 			UID:        ingress.UID,
 		})
-
-		// FIXME: merge by SecretName/Hosts?
-		if useWildcardTLS {
-			wildcardDomains = mergeWildcardDomains(wildcardDomains, ingress.Spec.Rules)
-		} else {
-			tls = append(tls, ingress.Spec.TLS...)
-		}
 
 	rules:
 		for _, r := range ingress.Spec.Rules {
@@ -272,6 +276,15 @@ func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMa
 			}
 
 			rules = append(rules, *r.DeepCopy())
+		}
+
+		if useWildcardTLS {
+			if useWildcardTLSIgnore.Matches(labels.Set(ingress.Labels)) {
+				continue
+			}
+			wildcardDomains = mergeWildcardDomains(wildcardDomains, ingress.Spec.Rules)
+		} else {
+			tls = append(tls, ingress.Spec.TLS...)
 		}
 	}
 
@@ -530,4 +543,13 @@ func wildcardTLSEntry(wildcardDomains map[string]bool, bucket *IngressBucket) ne
 		SecretName: secretName,
 		Hosts:      hosts,
 	}
+}
+
+func parseLabels(l string) (labels.Selector, error) {
+	selector, err := labels.Parse(l)
+	if err != nil {
+		return nil, err
+	}
+
+	return selector, nil
 }
