@@ -421,6 +421,12 @@ func (r *IngressReconciler) reconcileIngressBucket(ctx context.Context, configMa
 	}
 
 	for _, ingress := range bucket.Ingresses {
+		ingressClass := getIngressClass(&ingress)
+		if ingressClass != r.IngressClass {
+			r.Log.Info("ingress %s has changed ingress class, skipping", ingress.Name)
+			continue
+		}
+
 		if reflect.DeepEqual(ingress.Status, mergedIngress.Status) {
 			continue
 		}
